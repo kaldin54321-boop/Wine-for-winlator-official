@@ -320,7 +320,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-wine-wow64:
-    runs-on: ubuntu-24.04
+    # 重要：使用 ubuntu-22.04（而非 24.04）编译。24.04 的 glibc（2.39）比 Winlator
+    # 官方 rootfs 内置的 glibc 版本新，用 24.04 编译出的 wine 二进制文件会依赖
+    # rootfs 中不存在的 GLIBC_2.3x/2.38/2.39 符号版本。这种情况下 wine 进程会在
+    # 启动阶段直接因动态链接器错误退出（不会有清晰的错误提示），表现出来就是
+    # "容器无法进入桌面 / 一直返回容器主菜单"。22.04 的 glibc 更旧，产物向前兼容。
+    runs-on: ubuntu-22.04
     if: github.event.inputs.build_type == 'wine-wow64' || (github.event_name == 'schedule' && github.event.schedule == '0 2 5,20 * *')
     timeout-minutes: 180
     
@@ -726,17 +731,19 @@ jobs:
           echo "最终文件结构:"
           find wine-package -type f | sort | head -20
           
-          # 使用 tar.xz 格式打包
-          tar --zstd -cf $PACKAGE_NAME.tzst -C wine-package $PACKAGE_NAME
-          mv $PACKAGE_NAME.tzst $PACKAGE_NAME.whp
+          # 真正使用 tar.xz (xz 压缩) 格式打包 —— Winlator 的 "Install Wine Version"
+          # 导入功能 (WineUtils.extractWineFileForInstallAsync) 按 .tar.xz 处理，
+          # 之前用 --zstd 打包再改名为 .whp 只是换了后缀，内容仍是 zstd 流，
+          # 会被当作损坏的 tar.xz 解压失败/不完整，导致装进容器的 wine 实际上不可用
+          tar -cJf "$PACKAGE_NAME.tar.xz" -C wine-package "$PACKAGE_NAME"
           
           echo "打包完成:"
-          ls -lh *.whp
+          ls -lh *.tar.xz
 
       - name: Generate checksums
         run: |
           cd $GITHUB_WORKSPACE
-          sha256sum *.whp > checksums.txt
+          sha256sum *.tar.xz > checksums.txt
           cat checksums.txt
 
       - name: Upload Wine WoW64 artifacts
@@ -744,7 +751,7 @@ jobs:
         with:
           name: Wine-${{ github.event.inputs.wine_branch || 'winlator-official' }}-${{ github.event.inputs.wine_version || 'latest' }}-WoW64
           path: |
-            ${{ github.workspace }}/*.whp
+            ${{ github.workspace }}/*.tar.xz
             ${{ github.workspace }}/checksums.txt
           retention-days: 30
 
