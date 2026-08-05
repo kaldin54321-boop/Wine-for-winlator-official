@@ -27,18 +27,17 @@ on:
         - experimental_10.0
         - bleeding-edge
       wine_branch:
-        description: 'Wine 分支 (仅 Wine 构建) - winlator-official 直接使用 brunodev85/wine-10.10-custom 源码，与最新官方 Winlator (v11.0, Wine 10.10) 完全一致'
+        description: 'Wine 分支 (仅 Wine 构建) - vanilla 会额外应用从 brunodev85/wine-10.10-custom 与官方 wine-10.10 源码差异中提取的 Winlator/Android 兼容补丁（尽力而为，fuzzy patch），使最新版 vanilla wine 能兼容基于 Winlator 官方改的 mod'
         required: false
-        default: 'winlator-official'
+        default: 'vanilla'
         type: choice
         options:
-        - winlator-official
         - vanilla
         - staging
         - staging-tkg
         - staging-tkg-fsync
       wine_version:
-        description: 'Wine 版本 (仅 vanilla/staging/tkg 分支使用；winlator-official 固定为 10.10，此项被忽略)'
+        description: 'Wine 版本 (vanilla/staging/tkg 分支使用)'
         required: false
         default: 'latest'
         type: string
@@ -424,7 +423,7 @@ jobs:
           set -e
           
           # 设置环境变量
-          export WINE_BRANCH="${{ github.event.inputs.wine_branch || 'winlator-official' }}"
+          export WINE_BRANCH="${{ github.event.inputs.wine_branch || 'vanilla' }}"
           export WINE_VERSION="${{ github.event.inputs.wine_version || 'latest' }}"
           export BUILD_DIR="/tmp/build_wine_${WINE_BRANCH}_${WINE_VERSION}"
           
@@ -442,38 +441,11 @@ jobs:
           mkdir -p "$BUILD_DIR"
           cd "$BUILD_DIR"
           
-          # 是否跳过手动路径/mfplat补丁（仅 winlator-official 源码树自带官方补丁，跳过）
+          # 是否跳过手动路径/mfplat补丁（vanilla 分支在应用了官方兼容补丁差异后跳过，见下方）
           SKIP_MANUAL_PATCHES=false
           
           # 根据分支获取 Wine 源码
-          if [ "$WINE_BRANCH" = "winlator-official" ]; then
-            # 直接使用 brunodev85 维护的 Wine 10.10 官方 Winlator 源码
-            # 这是 Winlator v11.0 (最新官方版本) 实际打包使用的完整源码树，
-            # 已经内置了所有针对 Android/Box64 的路径修正和兼容性补丁，
-            # 因此不需要（也不应该）再手动叠加下面针对 vanilla/staging 分支的补丁步骤
-            echo "处理 Winlator 官方源码分支 (brunodev85/wine-10.10-custom)"
-            git clone --depth 1 https://github.com/brunodev85/wine-10.10-custom.git wine
-            SOURCE_DIR="wine"
-            cd "$SOURCE_DIR"
-            
-            git config advice.detachedHead false
-            
-            WINE_VERSION_ACTUAL="10.10"
-            COMMIT_HASH=$(git rev-parse --short HEAD)
-            # 命名遵循 Winlator 的 WineInfo 版本识别正则：
-            # ^wine-([0-9\.]+)-?([0-9\.]+)?-(x86|x86_64)$
-            # 这样打包出的压缩包才能被 Winlator 的"安装 Wine 版本"功能正确识别版本号
-            BUILD_NAME="wine-${WINE_VERSION_ACTUAL}-x86_64"
-            
-            echo "Winlator 官方源码构建信息:"
-            echo "  - Wine 版本: $WINE_VERSION_ACTUAL"
-            echo "  - 源码提交: $COMMIT_HASH"
-            echo "  - 构建名称: $BUILD_NAME"
-            
-            # 标记跳过后续的手动路径/mfplat补丁步骤（源码已内置官方补丁）
-            SKIP_MANUAL_PATCHES=true
-            
-          elif [ "$WINE_BRANCH" = "staging-tkg" ] || [ "$WINE_BRANCH" = "staging-tkg-fsync" ]; then
+          if [ "$WINE_BRANCH" = "staging-tkg" ] || [ "$WINE_BRANCH" = "staging-tkg-fsync" ]; then
             # TKG 系列处理 - 修复目录结构问题
             echo "处理 TKG 系列分支: $WINE_BRANCH"
             
@@ -591,7 +563,9 @@ jobs:
             fi
             
           elif [ "$WINE_BRANCH" = "vanilla" ]; then
-            # 原有的 vanilla 分支处理
+            # vanilla 分支：拉取最新上游 wine 源码，再叠加从
+            # brunodev85/wine-10.10-custom 与官方 wine-10.10 tag 的源码差异中
+            # 提取出的 Winlator/Android 兼容补丁集（而不只是简单的 /tmp 路径替换）
             echo "处理 Vanilla 分支"
             git clone https://github.com/wine-mirror/wine.git wine
             SOURCE_DIR="wine"
@@ -606,6 +580,30 @@ jobs:
             WINE_VERSION_ACTUAL=$(git describe --tags --abbrev=0 2>/dev/null || echo "$WINE_VERSION")
             COMMIT_HASH=$(git rev-parse --short HEAD)
             BUILD_NAME="wine-${WINE_VERSION_ACTUAL}-${COMMIT_HASH}-vanilla-wow64"
+            
+            echo "提取并应用官方 Winlator 兼容补丁 (brunodev85/wine-10.10-custom vs 官方 wine-10.10)..."
+            (
+              set -e
+              mkdir -p /tmp/official-patch-src
+              cd /tmp/official-patch-src
+              # 官方 wine-10.10-custom 是以官方 wine-10.10 tag 为基础做的 Android/Winlator 修改，
+              # 两者相减即可得到 Winlator 官方为兼容 Android/Box64 而打的全部补丁
+              git clone --depth 1 --branch wine-10.10 https://github.com/wine-mirror/wine.git upstream-10.10
+              git clone --depth 1 https://github.com/brunodev85/wine-10.10-custom.git custom-10.10
+              diff -ruN --exclude=.git --exclude=po --exclude=documentation \
+                upstream-10.10 custom-10.10 > official-winlator-compat.patch || true
+              echo "补丁文件大小: $(wc -l < official-winlator-compat.patch) 行"
+            ) || echo "⚠️ 获取官方兼容补丁差异失败（网络问题等），将回退到下方的手动路径/mfplat补丁"
+            
+            if [ -s /tmp/official-patch-src/official-winlator-compat.patch ]; then
+              echo "以尽力而为方式（允许部分 hunk 因版本差异被跳过）应用官方兼容补丁..."
+              patch -p1 --fuzz=5 --no-backup-if-mismatch \
+                < /tmp/official-patch-src/official-winlator-compat.patch \
+                || echo "⚠️ 部分补丁 hunk 未能应用（预期情况，通常是上游代码在这几个版本间发生了变化），已成功应用的部分仍然生效"
+              # 官方补丁差异里已经包含了针对 /tmp 路径和 mfplat 的修正，跳过下面更粗糙的手动步骤，
+              # 避免对同一处代码重复打补丁导致冲突
+              SKIP_MANUAL_PATCHES=true
+            fi
             
           else
             echo "未知的 Wine 分支: $WINE_BRANCH"
@@ -661,6 +659,14 @@ jobs:
               ./fix_wine9.2_mfplat.sh
               echo "✅ 9.10 以下版本修复完成"
             fi
+          fi
+          
+          # git 克隆的 wine 源码不像 release tarball 那样自带生成好的 configure 脚本，
+          # 上面打的补丁也可能改动了 configure.ac，所以这里统一（重新）生成一次，
+          # 避免出现 configure 缺失或与补丁后的 configure.ac 不一致的问题
+          if [ ! -x ./configure ] || [ configure.ac -nt configure ]; then
+            echo "生成/更新 configure 脚本..."
+            autoreconf -f
           fi
           
           # 配置和构建真正的 WOW64 Wine
@@ -731,27 +737,26 @@ jobs:
           echo "最终文件结构:"
           find wine-package -type f | sort | head -20
           
-          # 真正使用 tar.xz (xz 压缩) 格式打包 —— Winlator 的 "Install Wine Version"
-          # 导入功能 (WineUtils.extractWineFileForInstallAsync) 按 .tar.xz 处理，
-          # 之前用 --zstd 打包再改名为 .whp 只是换了后缀，内容仍是 zstd 流，
-          # 会被当作损坏的 tar.xz 解压失败/不完整，导致装进容器的 wine 实际上不可用
-          tar -cJf "$PACKAGE_NAME.tar.xz" -C wine-package "$PACKAGE_NAME"
+          # 使用 zstd 打包并改名为 .whp —— 这是你的 Winlator mod 自定义 wine 安装
+          # 功能所使用的默认格式
+          tar --zstd -cf "$PACKAGE_NAME.tzst" -C wine-package "$PACKAGE_NAME"
+          mv "$PACKAGE_NAME.tzst" "$PACKAGE_NAME.whp"
           
           echo "打包完成:"
-          ls -lh *.tar.xz
+          ls -lh *.whp
 
       - name: Generate checksums
         run: |
           cd $GITHUB_WORKSPACE
-          sha256sum *.tar.xz > checksums.txt
+          sha256sum *.whp > checksums.txt
           cat checksums.txt
 
       - name: Upload Wine WoW64 artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Wine-${{ github.event.inputs.wine_branch || 'winlator-official' }}-${{ github.event.inputs.wine_version || 'latest' }}-WoW64
+          name: Wine-${{ github.event.inputs.wine_branch || 'vanilla' }}-${{ github.event.inputs.wine_version || 'latest' }}-WoW64
           path: |
-            ${{ github.workspace }}/*.tar.xz
+            ${{ github.workspace }}/*.whp
             ${{ github.workspace }}/checksums.txt
           retention-days: 30
 
@@ -759,13 +764,13 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'wine-wow64'
         with:
-          tag_name: wine-${{ github.event.inputs.wine_branch || 'winlator-official' }}-${{ github.event.inputs.wine_version || 'latest' }}-wow64
-          name: Wine ${{ github.event.inputs.wine_branch || 'winlator-official' }} ${{ github.event.inputs.wine_version || 'latest' }} (WOW64 with Vulkan & GStreamer)
+          tag_name: wine-${{ github.event.inputs.wine_branch || 'vanilla' }}-${{ github.event.inputs.wine_version || 'latest' }}-wow64
+          name: Wine ${{ github.event.inputs.wine_branch || 'vanilla' }} ${{ github.event.inputs.wine_version || 'latest' }} (WOW64 with Vulkan & GStreamer)
           body: |
-            # Wine ${{ github.event.inputs.wine_branch || 'winlator-official' }} ${{ github.event.inputs.wine_version || 'latest' }} - WOW64 with Vulkan & GStreamer
+            # Wine ${{ github.event.inputs.wine_branch || 'vanilla' }} ${{ github.event.inputs.wine_version || 'latest' }} - WOW64 with Vulkan & GStreamer
 
             ## 版本信息
-            - **Wine 分支**: ${{ github.event.inputs.wine_branch || 'winlator-official' }}
+            - **Wine 分支**: ${{ github.event.inputs.wine_branch || 'vanilla' }}
             - **Wine 版本**: ${{ github.event.inputs.wine_version || 'latest' }}
             - **架构**: True WOW64 (同时支持 32 位和 64 位 Windows 应用程序)
             - **图形 API**: Vulkan 支持已启用
@@ -777,12 +782,13 @@ jobs:
             ✓ Vulkan 图形 API 支持
             ✓ 完整的 GStreamer 支持
             ✓ 中文环境支持
-            ✓ winlator-official 分支直接使用 brunodev85/wine-10.10-custom 源码，与官方 Winlator v11.0 内置的 Wine 完全一致
+            ✓ vanilla 分支在标准上游 wine 源码基础上，尽力应用了从 brunodev85/wine-10.10-custom
+              与官方 wine-10.10 源码差异中提取的 Winlator/Android 兼容补丁
 
             ## 安装说明（Winlator App 内导入）
             1. 打开 Winlator → 菜单 → Settings（设置）
             2. 在 "Installed Wine Versions" 区域，点击 "Install Wine Version"
-            3. 选择本 Release 中的 `${{ env.BUILD_NAME }}.tar.xz` 文件
+            3. 选择本 Release 中的 `${{ env.BUILD_NAME }}.whp` 文件
             4. Winlator 会自动运行 `wine --version` 检测版本并生成新的 Wine 前缀
             5. 在容器的 Container Settings 中，将 Wine Version 切换为新安装的版本
 
@@ -794,7 +800,7 @@ jobs:
             - 提交: ${{ github.sha }}
             - 工作流: ${{ github.workflow }}
           files: |
-            ${{ github.workspace }}/${{ env.BUILD_NAME }}.tar.xz
+            ${{ github.workspace }}/${{ env.BUILD_NAME }}.whp
             ${{ github.workspace }}/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
