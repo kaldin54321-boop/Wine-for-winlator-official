@@ -172,7 +172,7 @@ jobs:
           # could depend on the distro original python3 (3.8) has already
           # run above.
           update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 10
-          update-alternatives --set python3 /usr/bin/python3.10
+          update-alternatives --set python3 /usr/local/bin/python3.10
           hash -r
           python3 --version
 
