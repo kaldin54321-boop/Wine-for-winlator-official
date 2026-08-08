@@ -137,9 +137,15 @@ jobs:
           # container - without it the key import can fail silently, apt-get
           # update then skips the PPA, and python3.10 never actually gets
           # installed even though this whole script keeps running.
-          add-apt-repository -y ppa:deadsnakes/ppa
-          apt-get update
-          apt-get install -y --no-install-recommends python3.10 python3.10-venv python3.10-distutils
+          # Build Python 3.10 from source (more reliable than PPA in containers)
+          mkdir -p /tmp/python-build
+          cd /tmp/python-build
+          curl -sS https://www.python.org/ftp/python/3.10.14/Python-3.10.14.tgz | tar xz
+          cd Python-3.10.14
+          ./configure --prefix=/usr/local --enable-optimizations
+          make -j"$(nproc)"
+          make install
+          cd /work
 
           # Fail fast with a clear message here instead of a confusing Meson
           # "Program python3.10 found: NO" error much later in the log if the
@@ -162,7 +168,7 @@ jobs:
           # Safe to do here because every apt/add-apt-repository step that
           # could depend on the distro original python3 (3.8) has already
           # run above.
-          update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 10
+          update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 10
           update-alternatives --set python3 /usr/bin/python3.10
           hash -r
           python3 --version
