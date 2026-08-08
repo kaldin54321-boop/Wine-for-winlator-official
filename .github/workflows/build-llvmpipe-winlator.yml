@@ -13,9 +13,26 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     (docker/setup-qemu-action), not manual dpkg --add-architecture cross-compiling.
 #     This avoids "llvm-config is an arm64 ELF binary and can't run on the amd64
 #     runner" entirely, since under emulation it runs as a true native binary.
-#   - Base image is ubuntu:24.04 (noble): ships Python 3.12 and LLVM 18 by
-#     default, both already satisfying Mesa 26.x's minimums, so no deadsnakes
-#     and no from-source LLVM/Python build.
+#   - Base image is ubuntu:22.04 (jammy), NOT 24.04. This is a compatibility
+#     fix, not a convenience choice: a driver built on 24.04 requires glibc
+#     symbols (up to 2.39) and libstdc++ symbols (GLIBCXX up to ~3.4.32) newer
+#     than what Winlator's own glibc rootfs provides, so the dynamic linker
+#     refuses to load it at runtime -- this produces the exact "extraction
+#     succeeds, GPU info stays blank" symptom, because the failure is silent
+#     from the app's point of view. jammy's glibc (2.35) / gcc 11
+#     (GLIBCXX 3.4.29) baseline matches what a known-working llvmpipe build
+#     for this rootfs actually requires.
+#   - -Dshared-llvm=false is MANDATORY. Without it, Mesa links against the
+#     shared libLLVM-*.so provided by llvm-dev, and Winlator's rootfs does not
+#     ship that library at all -- so libGL/libvulkan_lvp fail to dlopen for
+#     exactly the same "silent failure, blank GPU info" reason as the glibc
+#     mismatch above. Statically linking LLVM's component libraries into the
+#     driver removes that runtime dependency entirely (at the cost of a much
+#     larger .so, which is expected and correct).
+#   - -Dzstd=disabled: falls back to zlib (which is a near-universal baseline
+#     dependency and already required unconditionally by Mesa) for disk-cache
+#     compression, instead of adding an extra libzstd.so.1 runtime dependency
+#     that may not exist in Winlator's rootfs.
 #   - glslang-tools is installed via apt (prebuilt glslangValidator binary).
 #     Mesa 26.x's build actually DOES require glslangValidator whenever any
 #     Vulkan driver is enabled (it compiles the internal Vulkan meta/blit
@@ -37,9 +54,9 @@ on:
         required: true
         default: "26.0.0"
       llvm_major:
-        description: "LLVM major version to build against (noble ships 18 by default)"
+        description: "LLVM major version to build against (jammy ships 15 in its own repos, matching this ABI baseline)"
         required: true
-        default: "18"
+        default: "15"
       package_name:
         description: "Base filename for the produced driver archive"
         required: true
@@ -55,7 +72,7 @@ on:
 
 env:
   MESA_VERSION: ${{ github.event.inputs.mesa_version || '26.0.0' }}
-  LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '18' }}
+  LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '15' }}
   PACKAGE_NAME: ${{ github.event.inputs.package_name || 'llvmpipe-mesa' }}
   VULKAN_API_VERSION: ${{ github.event.inputs.vulkan_api_version || '1.4.335' }}
   ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/imagefs/usr/lib/libvulkan_lvp.so' }}
@@ -167,6 +184,8 @@ jobs:
             -Dgles2=disabled \
             -Dshared-glapi=disabled \
             -Dllvm=enabled \
+            -Dshared-llvm=false \
+            -Dzstd=disabled \
             -Dvalgrind=disabled \
             -Dlibunwind=disabled \
             -Dtools= \
@@ -244,7 +263,7 @@ jobs:
           BUILD_SCRIPT
           chmod +x "${{ github.workspace }}/build.sh"
 
-      - name: Build inside emulated aarch64 ubuntu:24.04 container
+      - name: Build inside emulated aarch64 ubuntu:22.04 container
         run: |
           docker run --rm \
             --platform linux/arm64 \
@@ -255,7 +274,7 @@ jobs:
             -e ICD_LIBRARY_PATH="${{ env.ICD_LIBRARY_PATH }}" \
             -v "${{ github.workspace }}/build.sh:/build.sh:ro" \
             -v "${{ github.workspace }}/artifacts:/artifacts" \
-            ubuntu:24.04 \
+            ubuntu:22.04 \
             bash /build.sh
 
       - name: Verify archive is well-formed and has exactly 3 entries
@@ -270,6 +289,27 @@ jobs:
             exit 1
           fi
           echo "Archive OK: $(du -h "$FILE" | cut -f1), 3 entries confirmed"
+
+      - name: Diagnose ABI compatibility of produced binaries
+        run: |
+          FILE="artifacts/${{ env.PACKAGE_NAME }}-${{ env.MESA_VERSION }}-aarch64.tzst"
+          mkdir -p /tmp/abi-check && tar --zstd -xf "$FILE" -C /tmp/abi-check
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          for f in /tmp/abi-check/usr/lib/*.so /tmp/abi-check/usr/lib/*.so.1.7.0; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            echo "NEEDED (runtime library dependencies):"
+            aarch64-linux-gnu-readelf -d "$f" | grep NEEDED || true
+            echo "Max GLIBC symbol version required:"
+            aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBC_[0-9.]+' | sort -V -u | tail -1 || true
+            echo "Max GLIBCXX symbol version required:"
+            aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBCXX_[0-9.]+' | sort -V -u | tail -1 || true
+            if aarch64-linux-gnu-readelf -d "$f" | grep -qi 'NEEDED.*libLLVM'; then
+              echo "FATAL: $f still depends on a shared libLLVM -- -Dshared-llvm=false did not take effect" >&2
+              exit 1
+            fi
+            echo ""
+          done
 
       - name: Upload driver artifact
         uses: actions/upload-artifact@v4
