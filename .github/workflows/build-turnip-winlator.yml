@@ -125,7 +125,7 @@ jobs:
 
               # ---- host build tools ----
               apt-get install -y --no-install-recommends \
-                build-essential git pkg-config python3 python3-pip python3-setuptools \
+                build-essential cmake git pkg-config python3 python3-pip python3-setuptools \
                 ninja-build bison flex ca-certificates curl wget unzip zstd \
                 crossbuild-essential-arm64
 
