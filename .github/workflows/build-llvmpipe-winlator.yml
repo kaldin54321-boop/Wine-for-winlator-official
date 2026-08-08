@@ -106,13 +106,17 @@ jobs:
             libxshmfence-dev libxxf86vm-dev libxrandr-dev
 
           # Mandatory: Ubuntu 24.04's packaged meson can be older than what
-          # Mesa 26.x requires. Pin a known-good modern meson via a pip venv
-          # so it doesn't fight PEP 668 "externally managed environment".
-          echo "==> Installing pinned meson via pip venv"
-          python3 -m venv /opt/mesonvenv
-          /opt/mesonvenv/bin/pip install --upgrade pip
-          /opt/mesonvenv/bin/pip install "meson>=1.4,<2.0"
-          ln -sf /opt/mesonvenv/bin/meson /usr/local/bin/meson
+          # Mesa 26.x requires. Pin a known-good modern meson via pip,
+          # installed straight into the system interpreter with
+          # --break-system-packages (safe here: this is a disposable
+          # container, not a machine anyone else depends on). Deliberately
+          # NOT using `python3 -m venv`, since that needs the separate
+          # python3.12-venv package (ensurepip) which isn't installed by
+          # default and would be one more thing to keep in sync.
+          echo "==> Installing pinned meson via pip (system interpreter)"
+          python3 -m pip install --break-system-packages --upgrade pip
+          python3 -m pip install --break-system-packages "meson>=1.4,<2.0"
+          hash -r
           meson --version
 
           echo "==> Fetching Mesa ${MESA_VERSION} source"
@@ -151,8 +155,8 @@ jobs:
             -Dllvm=enabled \
             -Dvalgrind=disabled \
             -Dlibunwind=disabled \
-            -Dtools=[] \
-            -Dvulkan-layers=[]
+            -Dtools= \
+            -Dvulkan-layers=
 
           echo "==> Building"
           ninja -C build -j"$(nproc)"
