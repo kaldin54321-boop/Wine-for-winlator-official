@@ -127,9 +127,21 @@ jobs:
               apt-get install -y --no-install-recommends \
                 build-essential git pkg-config python3 python3-pip python3-setuptools \
                 ninja-build bison flex ca-certificates curl wget unzip zstd \
-                crossbuild-essential-arm64 glslang-tools
+                crossbuild-essential-arm64
 
               pip3 install --no-cache-dir "meson>=0.63" mako pyyaml
+
+              # ---- build glslang from source (Focal repos have old version) ----
+              mkdir -p /tmp/glslang-build
+              cd /tmp/glslang-build
+              git clone --depth 1 https://github.com/KhronosGroup/glslang.git
+              cd glslang
+              mkdir build && cd build
+              cmake -DCMAKE_BUILD_TYPE=Release ..
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /work
 
               # ---- arm64 (target) dev packages Turnip/Vulkan-WSI-X11 needs ----
               apt-get install -y --no-install-recommends \
