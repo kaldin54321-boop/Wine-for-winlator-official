@@ -129,7 +129,7 @@ jobs:
                 ninja-build bison flex ca-certificates curl wget unzip zstd \
                 crossbuild-essential-arm64
 
-              pip3 install --no-cache-dir "meson>=0.63" mako pyyaml
+              pip3 install --no-cache-dir "cmake>=3.22.1" "meson>=0.63" mako pyyaml
 
               # ---- build glslang from source (Focal repos have old version) ----
               mkdir -p /tmp/glslang-build
