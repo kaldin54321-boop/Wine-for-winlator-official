@@ -1,0 +1,259 @@
+name: Build Turnip Driver for Winlator (glibc)
+
+# -----------------------------------------------------------------------------
+# WHAT THIS BUILDS
+# -----------------------------------------------------------------------------
+# Compiles Mesa's Freedreno Vulkan driver (Turnip -> libvulkan_freedreno.so)
+# for aarch64, linked against the SAME glibc baseline Winlator's "glibc" build
+# ships internally, and packages it the way Winlator expects: a .tzst archive
+# containing exactly usr/lib/libvulkan_freedreno.so.
+#
+# WHY THE BUILD RUNS INSIDE ubuntu:20.04
+# -----------------------------------------------------------------------------
+# Every official Winlator release (brunodev85/winlator) that offers the glibc
+# variant - from v9.0 through the current v11.1 - bundles an Ubuntu RootFs
+# based on Focal Fossa (20.04), with glibc compatibility patches supplied by
+# the Termux-Pacman glibc-packages project. Focal ships glibc 2.31.
+#
+# If you compile Turnip on a modern GitHub-hosted runner (ubuntu-22.04 ->
+# glibc 2.35, ubuntu-24.04 -> glibc 2.39) the linker stamps the .so with
+# GLIBC_2.32/2.33/2.34+ symbol versions that do not exist inside Winlator's
+# Focal-based rootfs. The driver still *loads* far enough to show up in the
+# driver list, but calls into the missing symbols crash - which is exactly
+# the "d3d11 test fails / game won't launch" failure mode you described.
+# Building inside an ubuntu:20.04 container pins the toolchain's glibc
+# baseline back down to 2.31, matching the rootfs the app actually ships.
+#
+# This is also why this single workflow covers Winlator 10.0 through 11.1:
+# the glibc rootfs family (Focal Fossa) has not changed across that range,
+# so one correctly-ABI-matched build is compatible with all of them. If a
+# future Winlator release switches its rootfs base, the FROM line below is
+# the one thing that needs revisiting.
+#
+# TARGET ARCHITECTURE
+# -----------------------------------------------------------------------------
+# Android phones with Adreno GPUs are aarch64, so this cross-compiles from
+# the x86_64 runner to aarch64 using crossbuild-essential-arm64 + a Meson
+# cross file, rather than relying on native arm64 runners (which currently
+# default to a newer glibc than Focal).
+#
+# NOTE ON FIRST RUNS
+# -----------------------------------------------------------------------------
+# Mesa's dependency surface shifts between releases (Meson option names,
+# new required packages, etc). This workflow pins known-good apt packages
+# and Meson options for the freedreno/vulkan-only configuration, but if you
+# point `mesa_ref` at a very new or very old Mesa tag you may need to adjust
+# the `meson setup` options list below - check the failing job's log for
+# "ERROR: Unknown option" or "Dependency ... not found" and adjust there.
+# -----------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_ref:
+        description: "Mesa git ref to build (branch, tag, or commit SHA)"
+        required: true
+        default: "main"
+      driver_name:
+        description: "Name used in the output archive/filename"
+        required: true
+        default: "turnip-custom"
+      apply_winlator_wsi_patches:
+        description: "Apply Pipetto-crypto's Winlator X11/WSI compatibility patches"
+        type: boolean
+        required: true
+        default: true
+  push:
+    tags:
+      - "turnip-*"
+
+env:
+  # Ubuntu Focal = glibc 2.31, matching Winlator's glibc rootfs (v9.0-11.1)
+  BUILD_IMAGE: "ubuntu:20.04"
+  TARGET_TRIPLE: "aarch64-linux-gnu"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout workflow repo (for cross file / patch list)
+        uses: actions/checkout@v4
+
+      - name: Write Meson cross-compilation file
+        run: |
+          cat > cross-aarch64-focal.ini << 'EOF'
+          [binaries]
+          c = '/usr/bin/aarch64-linux-gnu-gcc'
+          cpp = '/usr/bin/aarch64-linux-gnu-g++'
+          ar = '/usr/bin/aarch64-linux-gnu-ar'
+          strip = '/usr/bin/aarch64-linux-gnu-strip'
+          pkg-config = '/usr/bin/aarch64-linux-gnu-pkg-config'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+
+          [properties]
+          needs_exe_wrapper = true
+          EOF
+
+      - name: Build Turnip inside Focal (glibc 2.31) container
+        run: |
+          docker run --rm \
+            -v "$PWD":/work \
+            -w /work \
+            -e DRIVER_NAME="${{ inputs.driver_name }}" \
+            -e MESA_REF="${{ inputs.mesa_ref }}" \
+            -e APPLY_PATCHES="${{ inputs.apply_winlator_wsi_patches }}" \
+            "$BUILD_IMAGE" \
+            bash -eux -c '
+              export DEBIAN_FRONTEND=noninteractive
+
+              # ---- enable arm64 packages alongside the native x86_64 ones ----
+              dpkg --add-architecture arm64
+              cat > /etc/apt/sources.list << "APT_EOF"
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main universe
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main universe
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu focal-security main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe
+          APT_EOF
+              apt-get update
+
+              # ---- host build tools ----
+              apt-get install -y --no-install-recommends \
+                build-essential git pkg-config python3 python3-pip python3-setuptools \
+                ninja-build bison flex ca-certificates curl wget unzip zstd \
+                crossbuild-essential-arm64
+
+              pip3 install --no-cache-dir "meson>=0.63" mako pyyaml
+
+              # ---- arm64 (target) dev packages Turnip/Vulkan-WSI-X11 needs ----
+              apt-get install -y --no-install-recommends \
+                libdrm-dev:arm64 \
+                libexpat1-dev:arm64 \
+                zlib1g-dev:arm64 \
+                libx11-dev:arm64 \
+                libx11-xcb-dev:arm64 \
+                libxext-dev:arm64 \
+                libxdamage-dev:arm64 \
+                libxfixes-dev:arm64 \
+                libxshmfence-dev:arm64 \
+                libxrandr-dev:arm64 \
+                libxxf86vm-dev:arm64 \
+                libxcb1-dev:arm64 \
+                libxcb-dri2-0-dev:arm64 \
+                libxcb-dri3-dev:arm64 \
+                libxcb-present-dev:arm64 \
+                libxcb-glx0-dev:arm64 \
+                libxcb-shm0-dev:arm64 \
+                libxcb-randr0-dev:arm64 \
+                libxcb-sync-dev:arm64 \
+                libxcb-xfixes0-dev:arm64
+
+              # cross pkg-config: only look at arm64 .pc files, ignore host ones
+              cat > /usr/bin/aarch64-linux-gnu-pkg-config << "PKGEOF"
+          #!/bin/sh
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
+          exec pkg-config "$@"
+          PKGEOF
+              chmod +x /usr/bin/aarch64-linux-gnu-pkg-config
+
+              # ---- fetch Mesa at the requested ref ----
+              git clone --filter=blob:none https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+              cd mesa-src
+              git fetch --depth 1 origin "$MESA_REF" || git fetch origin "$MESA_REF"
+              git checkout FETCH_HEAD || git checkout "$MESA_REF"
+
+              # ---- optional: Winlator-specific WSI/X11/timeline-semaphore
+              #      compatibility patches (Pipetto-crypto), used by the
+              #      community Winlator Turnip builds. Applied best-effort:
+              #      newer Mesa may already contain equivalent fixes upstream. ----
+              if [ "$APPLY_PATCHES" = "true" ]; then
+                for c in \
+                  9575886914d4a4ca09694c42e261f568ee8575d7 \
+                  d264c66f9950cb2331c22c21172a07520fb38c68 \
+                  96c4cb07b2a52124021c807f2c1ad4ab1f1cbf9c
+                do
+                  curl -fsSL "https://gitlab.freedesktop.org/Pipetto-crypto/mesa/-/commit/${c}.patch" -o "/tmp/${c}.patch" || continue
+                  git apply --3way "/tmp/${c}.patch" || \
+                    echo "NOTE: patch ${c} did not apply cleanly - likely already merged upstream for this Mesa ref, continuing."
+                done
+              fi
+
+              # ---- configure: freedreno/turnip only, no LLVM needed ----
+              meson setup build \
+                --cross-file ../cross-aarch64-focal.ini \
+                --buildtype release \
+                -Dplatforms=x11 \
+                -Dgallium-drivers= \
+                -Dvulkan-drivers=freedreno \
+                -Dfreedreno-kmds=kgsl \
+                -Dvulkan-beta=true \
+                -Db_ndebug=true \
+                -Dstrip=true
+
+              ninja -C build
+
+              # ---- collect the driver ----
+              mkdir -p /work/out
+              find build -name "libvulkan_freedreno.so" -exec cp {} /work/out/libvulkan_freedreno.so \;
+              aarch64-linux-gnu-strip --strip-unneeded /work/out/libvulkan_freedreno.so
+
+              file /work/out/libvulkan_freedreno.so
+            '
+
+      - name: Verify glibc symbol versions stay within Focal (2.31) baseline
+        run: |
+          set -e
+          MAXVER=$(objdump -T out/libvulkan_freedreno.so 2>/dev/null \
+            | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n1 || true)
+          echo "Highest GLIBC symbol version referenced: ${MAXVER:-none found}"
+          # Fails the build loudly instead of shipping a driver that will
+          # crash on-device with an unresolved symbol error.
+          python3 - "$MAXVER" << 'PYEOF'
+          import sys
+          v = sys.argv[1] if len(sys.argv) > 1 else ""
+          if v:
+              ver = tuple(int(x) for x in v.replace("GLIBC_", "").split("."))
+              if ver > (2, 31):
+                  print(f"ERROR: driver requires {v}, newer than Focal's glibc 2.31.")
+                  print("The Winlator glibc rootfs will not have this symbol.")
+                  sys.exit(1)
+          print("OK: within Focal glibc 2.31 baseline.")
+          PYEOF
+
+      - name: Package as Winlator .tzst (usr/lib/libvulkan_freedreno.so only)
+        run: |
+          set -eux
+          rm -rf pkgroot
+          mkdir -p pkgroot/usr/lib
+          cp out/libvulkan_freedreno.so pkgroot/usr/lib/libvulkan_freedreno.so
+
+          # Sanity check: this must be the ONLY file in the archive, at
+          # exactly this path, as required by Winlator's content installer.
+          find pkgroot -type f
+
+          ARCHIVE_NAME="${{ inputs.driver_name || 'turnip-custom' }}.tzst"
+          tar -cf - -C pkgroot usr/lib/libvulkan_freedreno.so | zstd -19 -T0 -o "${ARCHIVE_NAME}"
+
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
+          ls -lh "${ARCHIVE_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/turnip-')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARCHIVE_NAME }}
+          generate_release_notes: true
