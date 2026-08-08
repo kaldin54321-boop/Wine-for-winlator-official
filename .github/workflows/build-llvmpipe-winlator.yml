@@ -33,14 +33,12 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     dependency and already required unconditionally by Mesa) for disk-cache
 #     compression, instead of adding an extra libzstd.so.1 runtime dependency
 #     that may not exist in Winlator's rootfs.
-#   - glslang-tools is installed via apt (prebuilt glslangValidator binary).
-#     Mesa 26.x's build actually DOES require glslangValidator whenever any
-#     Vulkan driver is enabled (it compiles the internal Vulkan meta/blit
-#     shaders to SPIR-V at build time) — this was confirmed by the actual
-#     meson configure error, correcting an earlier assumption. Installing
-#     the packaged binary avoids the "no rule to make target
-#     glslangValidator" failure the earlier turnip pipeline hit when trying
-#     to build glslang from source.
+#   - glslang-tools is installed via apt for its runtime shared libs, but the
+#     glslangValidator BINARY it provides on jammy is too old for Mesa 26.x's
+#     hard `glslang >= 12.2` requirement. A current glslangValidator is built
+#     from upstream source via its own CMake+Ninja flow (never a bare `make`
+#     invocation, which is what broke the earlier turnip pipeline) and
+#     installed to /usr/local/bin, which sits ahead of /usr/bin on PATH.
 #   - -Dglx=xlib is the key option: it embeds the llvmpipe gallium driver
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
@@ -150,6 +148,30 @@ jobs:
           python3 -m pip install "meson>=1.4,<2.0"
           hash -r
           meson --version
+
+          echo "==> Building glslangValidator from source"
+          # jammy's glslang-tools apt package satisfies availability but not
+          # Mesa 26.x's version floor (meson.build hard-requires >= 12.2;
+          # jammy's packaged build reports older than that). Building from
+          # upstream's own CMake+Ninja flow (not a bare `make` invocation,
+          # which is what broke the earlier turnip pipeline) avoids both
+          # problems at once. Installing to /usr/local/bin means it's found
+          # ahead of the apt-provided /usr/bin/glslangValidator on PATH, so
+          # no need to uninstall the apt package.
+          git clone --depth 1 https://github.com/KhronosGroup/glslang.git /tmp/glslang
+          cd /tmp/glslang
+          python3 update_glslang_sources.py
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          ninja -C build
+          GLSLANG_BIN="$(find build -type f -name 'glslangValidator' | head -n1)"
+          if [ -z "$GLSLANG_BIN" ]; then
+            echo "FATAL: glslangValidator binary not found after build" >&2
+            exit 1
+          fi
+          install -Dm755 "$GLSLANG_BIN" /usr/local/bin/glslangValidator
+          cd / && rm -rf /tmp/glslang
+          hash -r
+          glslangValidator --version || true
 
           echo "==> Fetching Mesa ${MESA_VERSION} source"
           mkdir -p /build && cd /build
