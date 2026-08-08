@@ -16,7 +16,14 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #   - Base image is ubuntu:24.04 (noble): ships Python 3.12 and LLVM 18 by
 #     default, both already satisfying Mesa 26.x's minimums, so no deadsnakes
 #     and no from-source LLVM/Python build.
-#   - glslang is NOT built — it is not a dependency of llvmpipe/lavapipe.
+#   - glslang-tools is installed via apt (prebuilt glslangValidator binary).
+#     Mesa 26.x's build actually DOES require glslangValidator whenever any
+#     Vulkan driver is enabled (it compiles the internal Vulkan meta/blit
+#     shaders to SPIR-V at build time) — this was confirmed by the actual
+#     meson configure error, correcting an earlier assumption. Installing
+#     the packaged binary avoids the "no rule to make target
+#     glslangValidator" failure the earlier turnip pipeline hit when trying
+#     to build glslang from source.
 #   - -Dglx=xlib is the key option: it embeds the llvmpipe gallium driver
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
@@ -97,6 +104,7 @@ jobs:
             python3-mako python3-yaml python3-ply \
             bison flex \
             zstd \
+            glslang-tools \
             "llvm-${LLVM_MAJOR}-dev" "libclang-cpp${LLVM_MAJOR}-dev" clang-"${LLVM_MAJOR}" \
             libzstd-dev zlib1g-dev libexpat1-dev libelf-dev \
             libdrm-dev \
