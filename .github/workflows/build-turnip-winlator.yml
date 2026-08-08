@@ -203,16 +203,15 @@ jobs:
 
               # ---- configure: freedreno/turnip only, no LLVM needed ----
               meson setup build \
-                --cross-file ../cross-aarch64-focal.ini \
-                --buildtype release \
-                -Dplatforms=x11 \
-                -Dpython.executable=/usr/bin/python3.10 \
-                -Dgallium-drivers= \
-                -Dvulkan-drivers=freedreno \
-                -Dfreedreno-kmds=kgsl \
-                -Dvulkan-beta=true \
-                -Db_ndebug=true \
-                -Dstrip=true
+              --cross-file ../cross-aarch64-focal.ini \
+              --buildtype release \
+               -Dplatforms=x11 \
+               -Dgallium-drivers= \
+               -Dvulkan-drivers=freedreno \
+               -Dfreedreno-kmds=kgsl \
+               -Dvulkan-beta=true \
+               -Db_ndebug=true \
+               -Dstrip=true
 
               ninja -C build
 
