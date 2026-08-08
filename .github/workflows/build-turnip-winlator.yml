@@ -132,7 +132,7 @@ jobs:
               pip3 install --no-cache-dir "cmake>=3.22.1" "meson>=0.63" mako pyyaml
 
               # Ensure Meson finds Python 3.10
-              ln -sf /usr/bin/python3.10 /usr/bin/python3.10 || true
+              export PYTHON=/usr/bin/python3.10
 
               # ---- build glslang from source (Focal repos have old version) ----
               mkdir -p /tmp/glslang-build
@@ -206,6 +206,7 @@ jobs:
                 --cross-file ../cross-aarch64-focal.ini \
                 --buildtype release \
                 -Dplatforms=x11 \
+                -Dpython.executable=/usr/bin/python3.10 \
                 -Dgallium-drivers= \
                 -Dvulkan-drivers=freedreno \
                 -Dfreedreno-kmds=kgsl \
