@@ -130,6 +130,7 @@ jobs:
             ninja-build bison flex ca-certificates curl wget unzip zstd \
             crossbuild-essential-arm64 \
             libffi-dev \
+            libssl-dev \
             zlib1g-dev
 
           # ---- Add Deadsnakes PPA for Python 3.10 (Focal ships 3.8.10; Mesa
