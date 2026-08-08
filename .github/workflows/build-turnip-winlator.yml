@@ -145,6 +145,7 @@ jobs:
 
               # ---- arm64 (target) dev packages Turnip/Vulkan-WSI-X11 needs ----
               apt-get install -y --no-install-recommends \
+                spirv-tools \
                 libdrm-dev:arm64 \
                 libexpat1-dev:arm64 \
                 zlib1g-dev:arm64 \
