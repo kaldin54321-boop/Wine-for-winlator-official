@@ -64,10 +64,8 @@ on:
         required: true
         default: true
   push:
-  tags:
-    - "turnip-*"
-  branches:
-    - main
+    tags:
+      - "turnip-*"
 
 env:
   # Ubuntu Focal = glibc 2.31, matching Winlator's glibc rootfs (v9.0-11.1)
@@ -102,134 +100,134 @@ jobs:
           EOF
 
       - name: Build Turnip inside Focal (glibc 2.31) container
-        run: |
-          docker run --rm \
-            -v "$PWD":/work \
-            -w /work \
-            -e DRIVER_NAME="${{ inputs.driver_name }}" \
-            -e MESA_REF="${{ inputs.mesa_ref }}" \
-            -e APPLY_PATCHES="${{ inputs.apply_winlator_wsi_patches }}" \
-            "$BUILD_IMAGE" \
-            bash -eux -c '
-  export DEBIAN_FRONTEND=noninteractive
+         run: |
+           docker run --rm \
+             -v "$PWD":/work \
+             -w /work \
+             -e DRIVER_NAME="${{ inputs.driver_name }}" \
+             -e MESA_REF="${{ inputs.mesa_ref }}" \
+             -e APPLY_PATCHES="${{ inputs.apply_winlator_wsi_patches }}" \
+             "$BUILD_IMAGE" \
+             bash -eux -c '
+           export DEBIAN_FRONTEND=noninteractive
 
-  # ---- enable arm64 packages alongside the native x86_64 ones ----
-  dpkg --add-architecture arm64
-  cat > /etc/apt/sources.list << "APT_EOF"
-deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main universe
-deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main universe
-deb [arch=amd64] http://security.ubuntu.com/ubuntu focal-security main universe
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe
-APT_EOF
-  apt-get update
+           # ---- enable arm64 packages alongside the native x86_64 ones ----
+           dpkg --add-architecture arm64
+           cat > /etc/apt/sources.list << "APT_EOF"
+           deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main universe
+           deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main universe
+           deb [arch=amd64] http://security.ubuntu.com/ubuntu focal-security main universe
+           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe
+           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe
+           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe
+           APT_EOF
+           apt-get update
 
-  # ---- host build tools ----
-  apt-get install -y --no-install-recommends \
-    software-properties-common \
-    build-essential cmake git pkg-config python3 python3-pip python3-setuptools \
-    ninja-build bison flex ca-certificates curl wget unzip zstd \
-    crossbuild-essential-arm64
+           # ---- host build tools ----
+           apt-get install -y --no-install-recommends \
+             software-properties-common \
+             build-essential cmake git pkg-config python3 python3-pip python3-setuptools \
+             ninja-build bison flex ca-certificates curl wget unzip zstd \
+             crossbuild-essential-arm64
 
-  # ---- Add Deadsnakes PPA for Python 3.10 ----
-  add-apt-repository -y ppa:deadsnakes/ppa
-  apt-get update
-  apt-get install -y --no-install-recommends python3.10 python3.10-venv python3.10-distutils
+           # ---- Add Deadsnakes PPA for Python 3.10 ----
+           add-apt-repository -y ppa:deadsnakes/ppa
+           apt-get update
+           apt-get install -y --no-install-recommends python3.10 python3.10-venv python3.10-distutils
 
-  # ---- Install pip for Python 3.10 ----
-  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
-  python3.10 -m pip install --no-cache-dir "cmake>=3.22.1" "meson>=0.63" mako pyyaml
+           # ---- Install pip for Python 3.10 ----
+           curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+           python3.10 -m pip install --no-cache-dir "cmake>=3.22.1" "meson>=0.63" mako pyyaml
 
-  # ---- build glslang from source (Focal repos have old version) ----
-  mkdir -p /tmp/glslang-build
-  cd /tmp/glslang-build
-  git clone --depth 1 https://github.com/KhronosGroup/glslang.git
-  cd glslang
-  mkdir build && cd build
-  cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_OPT=OFF ..
-  cmake --build . --config Release -j$(nproc)
-  make install
-  ldconfig
-  cd /work
+           # ---- build glslang from source (Focal repos have old version) ----
+           mkdir -p /tmp/glslang-build
+           cd /tmp/glslang-build
+           git clone --depth 1 https://github.com/KhronosGroup/glslang.git
+           cd glslang
+           mkdir build && cd build
+           cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_OPT=OFF ..
+           cmake --build . --config Release -j$(nproc)
+           make install
+           ldconfig
+           cd /work
 
-  # ---- arm64 (target) dev packages Turnip/Vulkan-WSI-X11 needs ----
-  apt-get install -y --no-install-recommends \
-    spirv-tools \
-    libdrm-dev:arm64 \
-    libexpat1-dev:arm64 \
-    zlib1g-dev:arm64 \
-    libx11-dev:arm64 \
-    libx11-xcb-dev:arm64 \
-    libxext-dev:arm64 \
-    libxdamage-dev:arm64 \
-    libxfixes-dev:arm64 \
-    libxshmfence-dev:arm64 \
-    libxrandr-dev:arm64 \
-    libxxf86vm-dev:arm64 \
-    libxcb1-dev:arm64 \
-    libxcb-dri2-0-dev:arm64 \
-    libxcb-dri3-dev:arm64 \
-    libxcb-present-dev:arm64 \
-    libxcb-glx0-dev:arm64 \
-    libxcb-shm0-dev:arm64 \
-    libxcb-randr0-dev:arm64 \
-    libxcb-sync-dev:arm64 \
-    libxcb-xfixes0-dev:arm64
+           # ---- arm64 (target) dev packages Turnip/Vulkan-WSI-X11 needs ----
+           apt-get install -y --no-install-recommends \
+             spirv-tools \
+             libdrm-dev:arm64 \
+             libexpat1-dev:arm64 \
+             zlib1g-dev:arm64 \
+             libx11-dev:arm64 \
+             libx11-xcb-dev:arm64 \
+             libxext-dev:arm64 \
+             libxdamage-dev:arm64 \
+             libxfixes-dev:arm64 \
+             libxshmfence-dev:arm64 \
+             libxrandr-dev:arm64 \
+             libxxf86vm-dev:arm64 \
+             libxcb1-dev:arm64 \
+             libxcb-dri2-0-dev:arm64 \
+             libxcb-dri3-dev:arm64 \
+             libxcb-present-dev:arm64 \
+             libxcb-glx0-dev:arm64 \
+             libxcb-shm0-dev:arm64 \
+             libxcb-randr0-dev:arm64 \
+             libxcb-sync-dev:arm64 \
+             libxcb-xfixes0-dev:arm64
 
-  # cross pkg-config: only look at arm64 .pc files, ignore host ones
-  cat > /usr/bin/aarch64-linux-gnu-pkg-config << "PKGEOF"
-#!/bin/sh
-export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-export PKG_CONFIG_SYSROOT_DIR=/
-exec pkg-config "$@"
-PKGEOF
-  chmod +x /usr/bin/aarch64-linux-gnu-pkg-config
+           # cross pkg-config: only look at arm64 .pc files, ignore host ones
+           cat > /usr/bin/aarch64-linux-gnu-pkg-config << "PKGEOF"
+           #!/bin/sh
+           export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+           export PKG_CONFIG_SYSROOT_DIR=/
+           exec pkg-config "$@"
+           PKGEOF
+           chmod +x /usr/bin/aarch64-linux-gnu-pkg-config
 
-  # ---- fetch Mesa at the requested ref ----
-  git clone --filter=blob:none https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
-  cd mesa-src
-  git fetch --depth 1 origin "$MESA_REF" || git fetch origin "$MESA_REF"
-  git checkout FETCH_HEAD || git checkout "$MESA_REF"
+           # ---- fetch Mesa at the requested ref ----
+           git clone --filter=blob:none https://gitlab.freedesktop.org/mesa/mesa.git mesa-src
+           cd mesa-src
+           git fetch --depth 1 origin "$MESA_REF" || git fetch origin "$MESA_REF"
+           git checkout FETCH_HEAD || git checkout "$MESA_REF"
 
-  # ---- optional: Winlator-specific WSI/X11/timeline-semaphore
-  #      compatibility patches (Pipetto-crypto), used by the
-  #      community Winlator Turnip builds. Applied best-effort:
-  #      newer Mesa may already contain equivalent fixes upstream. ----
-  if [ "$APPLY_PATCHES" = "true" ]; then
-    for c in \
-      9575886914d4a4ca09694c42e261f568ee8575d7 \
-      d264c66f9950cb2331c22c21172a07520fb38c68 \
-      96c4cb07b2a52124021c807f2c1ad4ab1f1cbf9c
-    do
-      curl -fsSL "https://gitlab.freedesktop.org/Pipetto-crypto/mesa/-/commit/${c}.patch" -o "/tmp/${c}.patch" || continue
-      git apply --3way "/tmp/${c}.patch" || \
-        echo "NOTE: patch ${c} did not apply cleanly - likely already merged upstream for this Mesa ref, continuing."
-    done
-  fi
+           # ---- optional: Winlator-specific WSI/X11/timeline-semaphore
+           #      compatibility patches (Pipetto-crypto), used by the
+           #      community Winlator Turnip builds. Applied best-effort:
+           #      newer Mesa may already contain equivalent fixes upstream. ----
+           if [ "$APPLY_PATCHES" = "true" ]; then
+             for c in \
+               9575886914d4a4ca09694c42e261f568ee8575d7 \
+               d264c66f9950cb2331c22c21172a07520fb38c68 \
+               96c4cb07b2a52124021c807f2c1ad4ab1f1cbf9c
+             do
+               curl -fsSL "https://gitlab.freedesktop.org/Pipetto-crypto/mesa/-/commit/${c}.patch" -o "/tmp/${c}.patch" || continue
+               git apply --3way "/tmp/${c}.patch" || \
+                 echo "NOTE: patch ${c} did not apply cleanly - likely already merged upstream for this Mesa ref, continuing."
+             done
+           fi
 
-  # ---- configure: freedreno/turnip only, no LLVM needed ----
-  # Use python3.10 explicitly via mesonbuild module
-  python3.10 -m mesonbuild.mesonmain setup build \
-    --cross-file ../cross-aarch64-focal.ini \
-    --buildtype release \
-    -Dplatforms=x11 \
-    -Dgallium-drivers= \
-    -Dvulkan-drivers=freedreno \
-    -Dfreedreno-kmds=kgsl \
-    -Dvulkan-beta=true \
-    -Db_ndebug=true \
-    -Dstrip=true
+           # ---- configure: freedreno/turnip only, no LLVM needed ----
+           # Use python3.10 explicitly via mesonbuild module
+           python3.10 -m mesonbuild.mesonmain setup build \
+             --cross-file ../cross-aarch64-focal.ini \
+             --buildtype release \
+             -Dplatforms=x11 \
+             -Dgallium-drivers= \
+             -Dvulkan-drivers=freedreno \
+             -Dfreedreno-kmds=kgsl \
+             -Dvulkan-beta=true \
+             -Db_ndebug=true \
+             -Dstrip=true
 
-  ninja -C build
+           ninja -C build
 
-  # ---- collect the driver ----
-  mkdir -p /work/out
-  find build -name "libvulkan_freedreno.so" -exec cp {} /work/out/libvulkan_freedreno.so \;
-  aarch64-linux-gnu-strip --strip-unneeded /work/out/libvulkan_freedreno.so
+           # ---- collect the driver ----
+           mkdir -p /work/out
+           find build -name "libvulkan_freedreno.so" -exec cp {} /work/out/libvulkan_freedreno.so \;
+           aarch64-linux-gnu-strip --strip-unneeded /work/out/libvulkan_freedreno.so
 
-  file /work/out/libvulkan_freedreno.so
-'
+           file /work/out/libvulkan_freedreno.so
+           '
 
       - name: Verify glibc symbol versions stay within Focal (2.31) baseline
         run: |
