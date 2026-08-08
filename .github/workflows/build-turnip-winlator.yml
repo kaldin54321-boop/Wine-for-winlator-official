@@ -129,6 +129,7 @@ jobs:
             build-essential cmake git pkg-config python3 python3-pip python3-setuptools \
             ninja-build bison flex ca-certificates curl wget unzip zstd \
             crossbuild-essential-arm64
+            libffi-dev
 
           # ---- Add Deadsnakes PPA for Python 3.10 (Focal ships 3.8.10; Mesa
           #      meson.build requires >=3.10) ----
