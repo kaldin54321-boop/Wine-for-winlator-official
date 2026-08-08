@@ -131,22 +131,23 @@ jobs:
             libx11-xcb-dev libxcb-keysyms1-dev \
             libxshmfence-dev libxxf86vm-dev libxrandr-dev
 
-          # Mandatory: Ubuntu 24.04's packaged meson can be older than what
-          # Mesa 26.x requires. Pin a known-good modern meson via pip,
-          # installed straight into the system interpreter with
-          # --break-system-packages (safe here: this is a disposable
-          # container, not a machine anyone else depends on). Deliberately
-          # NOT using `python3 -m venv`, since that needs the separate
-          # python3.12-venv package (ensurepip) which isn't installed by
-          # default and would be one more thing to keep in sync.
+          # Mesa 26.x needs a meson newer than what jammy packages, so pin a
+          # known-good modern meson via pip, installed straight into the
+          # system interpreter. Deliberately NOT using `python3 -m venv`,
+          # since that needs the separate python3.10-venv package
+          # (ensurepip) which isn't installed by default and would be one
+          # more thing to keep in sync.
           echo "==> Installing pinned meson via pip (system interpreter)"
           # Deliberately NOT running "pip install --upgrade pip" first: the
           # apt-installed pip has no RECORD metadata (it's a dpkg-managed
           # file set), so pip's self-uninstall step during an upgrade fails
-          # with "Cannot uninstall pip 24.0, RECORD file not found". The
-          # apt-provided pip is perfectly capable of installing meson as-is,
-          # so just use it directly.
-          python3 -m pip install --break-system-packages "meson>=1.4,<2.0"
+          # with "Cannot uninstall pip 22.0.2, RECORD file not found".
+          # Also deliberately NOT passing --break-system-packages: that flag
+          # only exists on pip 23.0.1+ (PEP 668 support), and jammy ships
+          # pip 22.0.2, which errors with "no such option" if you pass it.
+          # jammy has no PEP 668 "externally managed environment" guard in
+          # the first place, so a plain install is correct here.
+          python3 -m pip install "meson>=1.4,<2.0"
           hash -r
           meson --version
 
