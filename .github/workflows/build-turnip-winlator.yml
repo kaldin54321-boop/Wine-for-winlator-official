@@ -137,8 +137,8 @@ jobs:
               git clone --depth 1 https://github.com/KhronosGroup/glslang.git
               cd glslang
               mkdir build && cd build
-              cmake -DCMAKE_BUILD_TYPE=Release ..
-              make -j$(nproc)
+              cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF ..
+              make -j$(nproc) glslangValidator
               make install
               ldconfig
               cd /work
