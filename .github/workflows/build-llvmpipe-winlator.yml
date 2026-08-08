@@ -114,7 +114,12 @@ jobs:
           # python3.12-venv package (ensurepip) which isn't installed by
           # default and would be one more thing to keep in sync.
           echo "==> Installing pinned meson via pip (system interpreter)"
-          python3 -m pip install --break-system-packages --upgrade pip
+          # Deliberately NOT running "pip install --upgrade pip" first: the
+          # apt-installed pip has no RECORD metadata (it's a dpkg-managed
+          # file set), so pip's self-uninstall step during an upgrade fails
+          # with "Cannot uninstall pip 24.0, RECORD file not found". The
+          # apt-provided pip is perfectly capable of installing meson as-is,
+          # so just use it directly.
           python3 -m pip install --break-system-packages "meson>=1.4,<2.0"
           hash -r
           meson --version
