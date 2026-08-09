@@ -1,0 +1,96 @@
+name: Build LLVMpipe Driver (Mesa)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: 'Mesa version to build'
+        required: true
+        default: '24.1.0'
+
+jobs:
+  build-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Mesa
+        uses: actions/checkout@v4
+        with:
+          repository: mesa3d/mesa
+          ref: mesa-${{ github.event.inputs.mesa_version }}
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build build-essential \
+            python3-mako python3-pip libexpat1-dev libz-dev \
+            llvm-15-dev clang-15 libunwind-dev zstd \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Setup Termux-Glibc Toolchain
+        run: |
+          # Pulling the glibc 2.38 environment from Termux-Pacman for linking
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          wget https://github.com/termux-pacman/glibc-packages/releases/download/v2.38/glibc-aarch64-2.38-6-aarch64.pkg.tar.zst
+          tar -I zstd -xf glibc-aarch64-2.38-6-aarch64.pkg.tar.zst -C $GITHUB_WORKSPACE/toolchain
+
+      - name: Configure Mesa (LLVMpipe)
+        run: |
+          # Create a cross-file for aarch64 glibc
+          cat <<EOF > cross-aarch64.txt
+          [binaries]
+          c = 'aarch64-linux-gnu-gcc'
+          cpp = 'aarch64-linux-gnu-g++'
+          ar = 'aarch64-linux-gnu-ar'
+          strip = 'aarch64-linux-gnu-strip'
+          pkgconfig = 'pkg-config'
+          llvm-config = '/usr/bin/llvm-config-15'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'aarch64'
+          cpu = 'armv8-a'
+          endian = 'little'
+
+          [properties]
+          sys_root = '$GITHUB_WORKSPACE/toolchain'
+          c_args = ['-I$GITHUB_WORKSPACE/toolchain/usr/include']
+          cpp_args = ['-I$GITHUB_WORKSPACE/toolchain/usr/include']
+          link_args = ['-L$GITHUB_WORKSPACE/toolchain/usr/lib', '-Wl,-rpath-link,$GITHUB_WORKSPACE/toolchain/usr/lib']
+          EOF
+
+          meson setup build \
+            --cross-file cross-aarch64.txt \
+            --prefix=/usr \
+            -Dplatforms=x11,wayland \
+            -Dgallium-drivers=swrast \
+            -Dvulkan-drivers=swrast \
+            -Dllvm=enabled \
+            -Dshared-llvm=disabled \
+            -Dbuildtype=release \
+            -Degl=enabled \
+            -Dgbm=enabled \
+            -Dgles1=disabled \
+            -Dgles2=enabled \
+            -Dglx=dri \
+            -Dopengl=true \
+            -Dosmesa=true
+
+      - name: Build and Package
+        run: |
+          ninja -C build
+          mkdir -p output/opengl output/vulkan
+          
+          # OpenGL LLVMpipe
+          cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/llvmpipe_dri.so
+          cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ../..
+          
+          # Vulkan LLVMpipe (lvp)
+          cp build/src/vulkan/device-select/libmesa_vulkan_device_select.so output/vulkan/
+          cp build/src/vulkan/runtime/libvulkan_runtime.a output/vulkan/ # Example, adjust as needed for lvp_icd
+          tar -cf - -C output/vulkan . | zstd -22 > llvmpipe-vulkan-${{ github.event.inputs.mesa_version }}.tzst
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvmpipe-drivers
+          path: "*.tzst"
