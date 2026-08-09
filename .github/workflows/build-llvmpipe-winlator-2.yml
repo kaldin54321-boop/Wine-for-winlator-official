@@ -10,55 +10,55 @@ on:
 
 jobs:
   build-aarch64:
-    # Use Ubuntu 22.04 (Jammy) for stable and compatible cross-compilation
-    runs-on: ubuntu-22.04
+    # Switched to ubuntu-latest (Ubuntu 24.04 Noble) to get newer libdrm (2.4.120)
+    # which is required by Mesa 24.1.0 (requires >= 2.4.119).
+    runs-on: ubuntu-latest
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Checkout Mesa
         run: |
-          # Use official GitLab source to bypass GitHub mirror auth/404 issues
+          # Use official GitLab source to avoid authentication and 404 errors on GitHub mirrors
           git clone --depth 1 --branch mesa-${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git .
 
       - name: Setup Multi-arch and Install Dependencies
         run: |
           sudo dpkg --add-architecture arm64
           
-          # Fix: Remove all existing sources to avoid "Malformed entry" and conflict errors
+          # Clean up all sources to avoid "Malformed entry" and "URI parse" errors
           sudo rm -rf /etc/apt/sources.list /etc/apt/sources.list.d/*
           
-          # Create a clean sources.list with explicit architecture tagging
+          # Create a clean multi-arch sources.list for Ubuntu 24.04 (Noble)
+          # Use standard mirrors for amd64, and ports.ubuntu.com for arm64
           cat <<EOF | sudo tee /etc/apt/sources.list
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
           EOF
           
           sudo apt-get update
           
-          # Install dependencies. We separate llvm-15-dev (amd64) and libllvm15 (arm64) to avoid python3 conflict.
+          # Install dependencies. Separating llvm-17-dev (amd64) and libllvm17 (arm64) to avoid conflicts.
           sudo apt-get install -y \
-            python3-pip python3-setuptools ninja-build build-essential flex bison pkg-config \
+            meson ninja-build build-essential flex bison pkg-config \
+            python3-mako python3-ply python3-setuptools \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libdrm-dev:arm64 libwayland-dev:arm64 libexpat1-dev:arm64 \
             libx11-dev:arm64 libxext-dev:arm64 libxfixes-dev:arm64 \
             libxcb1-dev:arm64 libxdamage-dev:arm64 libxshmfence-dev:arm64 \
             libxxf86vm-dev:arm64 libedit-dev:arm64 \
-            llvm-15-dev libllvm15:arm64 \
-            libunwind-dev:arm64 zlib1g-dev:arm64 zstd libzstd-dev:arm64
-          
-          # --- Meson Upgrade Fix ---
-          # Ubuntu 22.04 default Meson is 0.61.2, but Mesa 24.1.0 requires >= 1.1.0.
-          sudo pip3 install --upgrade meson mako
+            llvm-17-dev libllvm17:arm64 \
+            libunwind-dev:arm64 zlib1g-dev:arm64 zstd libzstd-dev:arm64 \
+            wayland-protocols glslang-tools
 
       - name: Apply Mesa Fixes for Android/Winlator
         run: |
           # 1. SHM/Memfd Fix: Force use of memfd_create instead of shm_open.
-          # Required for Android as it lacks /dev/shm.
-          echo "Applying native rendering optimizations..."
+          # Android kernels do not support POSIX SHM (/dev/shm).
+          echo "Applying native rendering optimizations for Android..."
           sed -i 's/USE_POSIX_SHM/USE_MEMFD/g' src/util/os_file.c 2>/dev/null || true
           
           # 2. Add missing headers for memfd constants
@@ -70,9 +70,10 @@ jobs:
       - name: Configure Mesa (LLVMpipe)
         run: |
           # Create an llvm-config wrapper for cross-compilation
+          # This ensures Mesa finds the correct ARM64 LLVM flags
           cat <<EOF | sudo tee /usr/bin/aarch64-llvm-config
           #!/bin/bash
-          /usr/bin/llvm-config-15 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
+          /usr/bin/llvm-config-17 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
           EOF
           sudo chmod +x /usr/bin/aarch64-llvm-config
 
@@ -83,7 +84,6 @@ jobs:
           cpp = 'aarch64-linux-gnu-g++'
           ar = 'aarch64-linux-gnu-ar'
           strip = 'aarch64-linux-gnu-strip'
-          # Use "pkg-config" instead of deprecated "pkgconfig"
           pkg-config = 'aarch64-linux-gnu-pkg-config'
           llvm-config = '/usr/bin/aarch64-llvm-config'
 
@@ -98,11 +98,8 @@ jobs:
           pkg_config_libdir = '/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
           EOF
 
-          # Ensure the upgraded Meson is in PATH (usually /usr/local/bin)
-          export PATH="/usr/local/bin:$PATH"
-
-          # Fixed: "surfaceless" is not a valid platform for Mesa 24.1.0. 
-          # Valid choices are: auto, x11, wayland, haiku, android, windows
+          # Configure Mesa for LLVMpipe (swrast)
+          # Platforms: removed "surfaceless" as it's invalid in 24.1.0
           meson setup build \
             --cross-file cross-aarch64.txt \
             --prefix=/usr \
@@ -116,11 +113,11 @@ jobs:
             -Dgbm=enabled \
             -Dopengl=true \
             -Dosmesa=true \
-            -Dglx=dri
+            -Dglx=dri \
+            -Dglvnd=disabled
 
       - name: Build and Package
         run: |
-          export PATH="/usr/local/bin:$PATH"
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
@@ -131,7 +128,7 @@ jobs:
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Symlink for loader fallback compatibility
+          # Symlink for loader compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
