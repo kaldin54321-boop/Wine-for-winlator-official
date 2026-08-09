@@ -30,17 +30,35 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/toolchain
           
-          # Fix 403 Forbidden by using --user-agent Mozilla/5.0
-          # This allows downloading from service.termux-pacman.dev which blocks default wget agents
-          wget --user-agent="Mozilla/5.0" https://service.termux-pacman.dev/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst
+          # The 403 Forbidden is caused by server-side blocking of default wget/curl agents.
+          # We use a full browser User-Agent and multiple mirror attempts.
+          # We also disable 'exit on error' (-e) for the download attempts to allow falling back.
           
-          if [ -f glibc-2.38-11-aarch64.pkg.tar.zst ]; then
-            tar -I zstd -xf glibc-2.38-11-aarch64.pkg.tar.zst -C ${{ github.workspace }}/toolchain
-          else
-            echo "Primary mirror failed, trying backup mirror..."
-            wget --user-agent="Mozilla/5.0" https://mirror.clarkson.edu/termux-pacman/main/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst
-            tar -I zstd -xf glibc-2.38-11-aarch64.pkg.tar.zst -C ${{ github.workspace }}/toolchain
+          DOWNLOAD_SUCCESS=false
+          MIRRORS=(
+            "https://service.termux-pacman.dev/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
+            "https://ftp.agdsn.de/pub/mirrors/termux/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
+            "https://mirror.isoc.org.il/pub/termux/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
+          )
+          
+          for url in "${MIRRORS[@]}"; do
+            echo "Attempting to download glibc from: $url"
+            if curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+               --connect-timeout 30 --retry 3 -f "$url" -o glibc.tar.zst; then
+              echo "Download successful!"
+              DOWNLOAD_SUCCESS=true
+              break
+            fi
+            echo "Failed to download from $url"
+          done
+          
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            echo "Error: All mirrors returned 403 Forbidden or were unreachable."
+            exit 1
           fi
+          
+          tar -I zstd -xf glibc.tar.zst -C ${{ github.workspace }}/toolchain
+          rm glibc.tar.zst
 
       - name: Configure Mesa (LLVMpipe)
         run: |
@@ -92,6 +110,10 @@ jobs:
           else
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
+          
+          # Mesa Fix: Add necessary symlinks for OpenGL compatibility
+          ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
+          
           cd output/opengl && tar -cf - . | zstd -22 > ../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
 
           # --- Vulkan LLVMpipe (Lavapipe) ---
@@ -100,6 +122,7 @@ jobs:
           cp build/src/gallium/targets/lavapipe/libvulkan_lvp.so output/vulkan/usr/lib/libvulkan_lvp.so
           
           # Generate the ICD JSON (The critical "Mesa fix" for loading Vulkan software rendering on Android)
+          # library_path must point to the relative location of the .so file
           cat <<EOF > output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
           {
               "file_format_version": "1.0.0",
