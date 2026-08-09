@@ -52,7 +52,6 @@ jobs:
           
           # --- Meson Upgrade Fix ---
           # Ubuntu 22.04 default Meson is 0.61.2, but Mesa 24.1.0 requires >= 1.1.0.
-          # We upgrade Meson and Mako via pip3.
           sudo pip3 install --upgrade meson mako
 
       - name: Apply Mesa Fixes for Android/Winlator
@@ -84,7 +83,8 @@ jobs:
           cpp = 'aarch64-linux-gnu-g++'
           ar = 'aarch64-linux-gnu-ar'
           strip = 'aarch64-linux-gnu-strip'
-          pkgconfig = 'aarch64-linux-gnu-pkg-config'
+          # Use "pkg-config" instead of deprecated "pkgconfig"
+          pkg-config = 'aarch64-linux-gnu-pkg-config'
           llvm-config = '/usr/bin/aarch64-llvm-config'
 
           [host_machine]
@@ -101,10 +101,12 @@ jobs:
           # Ensure the upgraded Meson is in PATH (usually /usr/local/bin)
           export PATH="/usr/local/bin:$PATH"
 
+          # Fixed: "surfaceless" is not a valid platform for Mesa 24.1.0. 
+          # Valid choices are: auto, x11, wayland, haiku, android, windows
           meson setup build \
             --cross-file cross-aarch64.txt \
             --prefix=/usr \
-            -Dplatforms=x11,surfaceless \
+            -Dplatforms=x11,wayland \
             -Dgallium-drivers=swrast \
             -Dvulkan-drivers=swrast \
             -Dllvm=enabled \
@@ -118,6 +120,7 @@ jobs:
 
       - name: Build and Package
         run: |
+          export PATH="/usr/local/bin:$PATH"
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
@@ -128,7 +131,7 @@ jobs:
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Symlink for compatibility
+          # Symlink for loader fallback compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
