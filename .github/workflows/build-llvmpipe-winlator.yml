@@ -120,6 +120,12 @@ jobs:
           ICD_LIBRARY_PATH="${ICD_LIBRARY_PATH:?}"
 
           echo "==> Updating apt and installing mandatory build dependencies"
+          # mantic (23.10) is EOL: ports.ubuntu.com has fully purged it (404
+          # on Release files), so apt must be pointed at the EOL archive
+          # instead. old-releases.ports.ubuntu.com is the ports-architecture
+          # equivalent of old-releases.ubuntu.com (which only serves
+          # amd64/i386, not arm64).
+          sed -i 's|ports.ubuntu.com|old-releases.ports.ubuntu.com|g' /etc/apt/sources.list
           apt-get update
           echo "==> Confirming base image glibc version (should be 2.38 for mantic)"
           ldd --version | head -n1
