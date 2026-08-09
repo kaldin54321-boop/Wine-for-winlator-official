@@ -10,26 +10,24 @@ on:
 
 jobs:
   build-aarch64:
-    # Switched to ubuntu-latest (Ubuntu 24.04 Noble) to get newer libdrm (2.4.120)
-    # which is required by Mesa 24.1.0 (requires >= 2.4.119).
+    # Use Ubuntu 24.04 (Noble) for modern dependencies (libdrm >= 2.4.119)
     runs-on: ubuntu-latest
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Checkout Mesa
         run: |
-          # Use official GitLab source to avoid authentication and 404 errors on GitHub mirrors
+          # Use official GitLab source to bypass GitHub mirror authentication issues
           git clone --depth 1 --branch mesa-${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git .
 
       - name: Setup Multi-arch and Install Dependencies
         run: |
           sudo dpkg --add-architecture arm64
           
-          # Clean up all sources to avoid "Malformed entry" and "URI parse" errors
+          # Clean up sources to avoid "Malformed entry" and conflict errors
           sudo rm -rf /etc/apt/sources.list /etc/apt/sources.list.d/*
           
-          # Create a clean multi-arch sources.list for Ubuntu 24.04 (Noble)
-          # Use standard mirrors for amd64, and ports.ubuntu.com for arm64
+          # Create a clean multi-arch sources.list for Ubuntu 24.04
           cat <<EOF | sudo tee /etc/apt/sources.list
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
@@ -41,10 +39,9 @@ jobs:
           
           sudo apt-get update
           
-          # Install dependencies. Separating llvm-17-dev (amd64) and libllvm17 (arm64) to avoid conflicts.
+          # Install dependencies. Separating amd64 and arm64 packages to prevent Python3 conflicts.
           sudo apt-get install -y \
-            meson ninja-build build-essential flex bison pkg-config \
-            python3-mako python3-ply python3-setuptools \
+            python3-pip python3-setuptools ninja-build build-essential flex bison pkg-config \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libdrm-dev:arm64 libwayland-dev:arm64 libexpat1-dev:arm64 \
             libx11-dev:arm64 libxext-dev:arm64 libxfixes-dev:arm64 \
@@ -52,39 +49,50 @@ jobs:
             libxxf86vm-dev:arm64 libedit-dev:arm64 \
             llvm-17-dev libllvm17:arm64 \
             libunwind-dev:arm64 zlib1g-dev:arm64 zstd libzstd-dev:arm64 \
-            wayland-protocols glslang-tools
+            wayland-protocols glslang-tools libglvnd-dev:arm64
+          
+          # Upgrade Meson and Mako to ensure compatibility with Mesa 24.1.0
+          sudo pip3 install --upgrade meson mako ply
 
       - name: Apply Mesa Fixes for Android/Winlator
         run: |
-          # 1. SHM/Memfd Fix: Force use of memfd_create instead of shm_open.
-          # Android kernels do not support POSIX SHM (/dev/shm).
-          echo "Applying native rendering optimizations for Android..."
+          # --- Mandatory Android "Mesa Fix" ---
+          # Force use of memfd_create instead of shm_open. 
+          # Android kernels lack /dev/shm, so drivers using POSIX SHM will fail.
+          echo "Applying memfd/SHM optimization..."
           sed -i 's/USE_POSIX_SHM/USE_MEMFD/g' src/util/os_file.c 2>/dev/null || true
-          
-          # 2. Add missing headers for memfd constants
           sed -i '/#include <sys\/mman.h>/a #include <linux/memfd.h>' src/util/os_file.c 2>/dev/null || true
           
-          # 3. CPU Detection Fix: Avoid failing platform checks during cross-build
+          # Avoid failing platform checks during cross-build initialization
           sed -i 's/detect_pci_device/false/g' src/gallium/auxiliary/util/u_cpu_detect.c 2>/dev/null || true
 
       - name: Configure Mesa (LLVMpipe)
         run: |
-          # Create an llvm-config wrapper for cross-compilation
-          # This ensures Mesa finds the correct ARM64 LLVM flags
+          # --- Create robust wrappers for cross-compilation ---
+          
+          # 1. Pkg-Config Wrapper (Essential for finding arm64 libs)
+          cat <<EOF | sudo tee /usr/bin/aarch64-linux-gnu-pkg-config
+#!/bin/bash
+export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+exec pkg-config "\$@"
+EOF
+          sudo chmod +x /usr/bin/aarch64-linux-gnu-pkg-config
+
+          # 2. LLVM Config Wrapper
           cat <<EOF | sudo tee /usr/bin/aarch64-llvm-config
-          #!/bin/bash
-          /usr/bin/llvm-config-17 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
-          EOF
+#!/bin/bash
+/usr/bin/llvm-config-17 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
+EOF
           sudo chmod +x /usr/bin/aarch64-llvm-config
 
-          # Create the cross-file pointing to the arm64 sysroot
+          # Create the cross-file pointing to the arm64 environment
           cat <<EOF > cross-aarch64.txt
           [binaries]
           c = 'aarch64-linux-gnu-gcc'
           cpp = 'aarch64-linux-gnu-g++'
           ar = 'aarch64-linux-gnu-ar'
           strip = 'aarch64-linux-gnu-strip'
-          pkg-config = 'aarch64-linux-gnu-pkg-config'
+          pkg-config = '/usr/bin/aarch64-linux-gnu-pkg-config'
           llvm-config = '/usr/bin/aarch64-llvm-config'
 
           [host_machine]
@@ -94,12 +102,12 @@ jobs:
           endian = 'little'
 
           [properties]
-          sys_root = '/usr/aarch64-linux-gnu'
           pkg_config_libdir = '/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
           EOF
 
-          # Configure Mesa for LLVMpipe (swrast)
-          # Platforms: removed "surfaceless" as it's invalid in 24.1.0
+          # Ensure the upgraded Meson is used
+          export PATH="/usr/local/bin:$PATH"
+
           meson setup build \
             --cross-file cross-aarch64.txt \
             --prefix=/usr \
@@ -118,9 +126,11 @@ jobs:
 
       - name: Build and Package
         run: |
+          export PATH="/usr/local/bin:$PATH"
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
+          # Winlator expects llvmpipe_dri.so in usr/lib
           mkdir -p output/opengl/usr/lib
           if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
             cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
@@ -128,7 +138,7 @@ jobs:
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Symlink for loader compatibility
+          # Add symlink for compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
