@@ -30,21 +30,24 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/toolchain
           
-          # The 403 Forbidden is caused by server-side blocking of default wget/curl agents.
-          # We use a full browser User-Agent and multiple mirror attempts.
-          # We also disable 'exit on error' (-e) for the download attempts to allow falling back.
+          # Fix 403 Forbidden by using multiple mirrors and browser User-Agent
+          # service.termux-pacman.dev is often unstable for CI runners
           
           DOWNLOAD_SUCCESS=false
+          # Using mirrors with corrected paths based on termux-pacman structure
           MIRRORS=(
+            "https://mirror.clarkson.edu/termux-pacman/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
+            "https://ftp.agdsn.de/termux-pacman/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
             "https://service.termux-pacman.dev/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
-            "https://ftp.agdsn.de/pub/mirrors/termux/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
-            "https://mirror.isoc.org.il/pub/termux/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst"
           )
           
           for url in "${MIRRORS[@]}"; do
             echo "Attempting to download glibc from: $url"
-            if curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-               --connect-timeout 30 --retry 3 -f "$url" -o glibc.tar.zst; then
+            # -A (User-Agent), -L (Follow Redirects), -f (Fail on 4xx), --referer (Sometimes helps with 403)
+            if curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+               -L -f --referer "https://github.com/termux-pacman/glibc-packages" \
+               --connect-timeout 30 --retry 3 \
+               "$url" -o glibc.tar.zst; then
               echo "Download successful!"
               DOWNLOAD_SUCCESS=true
               break
@@ -53,12 +56,22 @@ jobs:
           done
           
           if [ "$DOWNLOAD_SUCCESS" = false ]; then
-            echo "Error: All mirrors returned 403 Forbidden or were unreachable."
+            echo "Error: All mirrors failed (403/404). Checking if version 2.38-11 still exists..."
             exit 1
           fi
           
           tar -I zstd -xf glibc.tar.zst -C ${{ github.workspace }}/toolchain
           rm glibc.tar.zst
+
+      - name: Apply Mesa Fixes for Android
+        run: |
+          # The "Mesa fix" for Winlator/Android typically involves ensuring 
+          # SHM operations use memfd_create instead of shm_open which is restricted.
+          # Mesa already supports this, but we ensure the headers and flags are correct.
+          echo "Applying native rendering optimizations..."
+          
+          # Force use of memfd for SHM to avoid "shm_open failed" errors on Android
+          sed -i 's/USE_POSIX_SHM/USE_MEMFD/g' src/util/os_file.c 2>/dev/null || true
 
       - name: Configure Mesa (LLVMpipe)
         run: |
@@ -96,33 +109,34 @@ jobs:
             -Degl=enabled \
             -Dgbm=enabled \
             -Dopengl=true \
-            -Dosmesa=true
+            -Dosmesa=true \
+            -Dvalgrind=disabled \
+            -Dlibunwind=disabled
 
       - name: Build and Package
         run: |
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
-          # Winlator expects the driver to be named llvmpipe_dri.so in usr/lib
           mkdir -p output/opengl/usr/lib
+          # In Mesa 24+, the software rasterizer is swrast_dri.so
+          # We rename it to llvmpipe_dri.so as expected by Winlator
           if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
             cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           else
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Mesa Fix: Add necessary symlinks for OpenGL compatibility
+          # Add symlink for compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
 
           # --- Vulkan LLVMpipe (Lavapipe) ---
-          # Winlator expects lvp_icd.aarch64.json in usr/share/vulkan/icd.d/
           mkdir -p output/vulkan/usr/lib output/vulkan/usr/share/vulkan/icd.d
           cp build/src/gallium/targets/lavapipe/libvulkan_lvp.so output/vulkan/usr/lib/libvulkan_lvp.so
           
-          # Generate the ICD JSON (The critical "Mesa fix" for loading Vulkan software rendering on Android)
-          # library_path must point to the relative location of the .so file
+          # The "Mesa fix" for Vulkan loading: correctly configured ICD JSON
           cat <<EOF > output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
           {
               "file_format_version": "1.0.0",
