@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Checkout Mesa
         run: |
-          # Official GitLab source is more reliable for Mesa builds
+          # Use official GitLab source to bypass 'Repository not found' errors on GitHub mirror
           git clone --depth 1 --branch mesa-${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git .
 
       - name: Install Build Dependencies
@@ -29,9 +29,18 @@ jobs:
       - name: Setup Termux-Glibc Toolchain
         run: |
           mkdir -p ${{ github.workspace }}/toolchain
-          # Using a stable glibc 2.38 build from service.termux-pacman.dev
-          wget https://service.termux-pacman.dev/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst
-          tar -I zstd -xf glibc-2.38-11-aarch64.pkg.tar.zst -C ${{ github.workspace }}/toolchain
+          
+          # Fix 403 Forbidden by using --user-agent Mozilla/5.0
+          # This allows downloading from service.termux-pacman.dev which blocks default wget agents
+          wget --user-agent="Mozilla/5.0" https://service.termux-pacman.dev/gpkg/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst
+          
+          if [ -f glibc-2.38-11-aarch64.pkg.tar.zst ]; then
+            tar -I zstd -xf glibc-2.38-11-aarch64.pkg.tar.zst -C ${{ github.workspace }}/toolchain
+          else
+            echo "Primary mirror failed, trying backup mirror..."
+            wget --user-agent="Mozilla/5.0" https://mirror.clarkson.edu/termux-pacman/main/aarch64/glibc-2.38-11-aarch64.pkg.tar.zst
+            tar -I zstd -xf glibc-2.38-11-aarch64.pkg.tar.zst -C ${{ github.workspace }}/toolchain
+          fi
 
       - name: Configure Mesa (LLVMpipe)
         run: |
@@ -75,22 +84,33 @@ jobs:
         run: |
           ninja -C build
           
-          # Prepare OpenGL LLVMpipe package (Expected by XServerDisplayActivity at usr/lib/llvmpipe_dri.so)
+          # --- OpenGL LLVMpipe ---
+          # Winlator expects the driver to be named llvmpipe_dri.so in usr/lib
           mkdir -p output/opengl/usr/lib
-          cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
-          cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ../..
-          
-          # Prepare Vulkan LLVMpipe (lvp) package (Expected by XServerDisplayActivity at usr/share/vulkan/icd.d/)
+          if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
+            cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
+          else
+            cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
+          fi
+          cd output/opengl && tar -cf - . | zstd -22 > ../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
+
+          # --- Vulkan LLVMpipe (Lavapipe) ---
+          # Winlator expects lvp_icd.aarch64.json in usr/share/vulkan/icd.d/
           mkdir -p output/vulkan/usr/lib output/vulkan/usr/share/vulkan/icd.d
           cp build/src/gallium/targets/lavapipe/libvulkan_lvp.so output/vulkan/usr/lib/libvulkan_lvp.so
           
-          # Generate/Fix ICD JSON
-          ICD_FILE=$(find build -name "lvp_icd.*.json" | head -n 1)
-          cp $ICD_FILE output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
-          # Point the ICD to the relative path of the library
-          sed -i 's|"library_path":.*|"library_path": "../../../lib/libvulkan_lvp.so"|' output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          # Generate the ICD JSON (The critical "Mesa fix" for loading Vulkan software rendering on Android)
+          cat <<EOF > output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          {
+              "file_format_version": "1.0.0",
+              "ICD": {
+                  "library_path": "../../../lib/libvulkan_lvp.so",
+                  "api_version": "1.3.255"
+              }
+          }
+          EOF
           
-          cd output/vulkan && tar -cf - . | zstd -22 > ../../llvmpipe-vulkan-${{ github.event.inputs.mesa_version }}.tzst && cd ../..
+          cd output/vulkan && tar -cf - . | zstd -22 > ../llvmpipe-vulkan-${{ github.event.inputs.mesa_version }}.tzst && cd ..
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
