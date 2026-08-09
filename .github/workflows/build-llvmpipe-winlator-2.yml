@@ -10,24 +10,25 @@ on:
 
 jobs:
   build-aarch64:
-    # Use Ubuntu 22.04 (Jammy) to ensure glibc 2.35 compatibility.
-    # This is compatible with Winlator's glibc 2.38+ environment.
+    # Use Ubuntu 22.04 (Jammy) for stable cross-compilation
     runs-on: ubuntu-22.04
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Checkout Mesa
         run: |
+          # Use official GitLab source to bypass GitHub mirror auth/404 issues
           git clone --depth 1 --branch mesa-${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git .
 
       - name: Setup Multi-arch and Install Dependencies
         run: |
           sudo dpkg --add-architecture arm64
           
-          # Fix: Standard Ubuntu mirrors (archive.ubuntu.com) do not host arm64 packages.
-          # We must restrict them to amd64 and add ports.ubuntu.com for arm64.
-          sudo sed -i 's/^deb http/deb [arch=amd64] http/g' /etc/apt/sources.list
-          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sed -i 's/^deb http/deb [arch=amd64] http/g' {} +
+          # Fix: GitHub's default mirrors (azure.archive and security) DO NOT host arm64 packages.
+          # We MUST restrict them to amd64 and add ports.ubuntu.com which hosts arm64 (ports).
+          # This prevents the 404 errors seen in your previous logs.
+          sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's/^deb /deb [arch=amd64] /g' {} +
           
           cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
@@ -38,6 +39,7 @@ jobs:
           sudo apt-get update
           
           # Install cross-compiler and target architecture (arm64) libraries.
+          # We use LLVM 15 as it's the stable default for Jammy.
           sudo apt-get install -y \
             meson ninja-build build-essential flex bison pkg-config python3-mako \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
@@ -45,23 +47,22 @@ jobs:
             libx11-dev:arm64 libxext-dev:arm64 libxfixes-dev:arm64 \
             libxcb1-dev:arm64 libxdamage-dev:arm64 libxshmfence-dev:arm64 \
             libxxf86vm-dev:arm64 libedit-dev:arm64 llvm-15-dev:arm64 \
-            libunwind-dev:arm64 zlib1g-dev:arm64 zstd
+            libunwind-dev:arm64 zlib1g-dev:arm64 zstd libzstd-dev:arm64
 
-      - name: Apply Mesa "SHM/Android" Fixes
+      - name: Apply Mesa Fixes for Android/Winlator
         run: |
-          # The critical Mesa fix for Android/Winlator:
-          # 1. Force use of memfd instead of shm_open (Android lacks /dev/shm)
-          # 2. Fix potential SHM build errors in util code
-          echo "Applying SHM and Android optimizations..."
+          # 1. SHM/Memfd Fix: Android does not support POSIX SHM (/dev/shm).
+          # We force Mesa to use memfd_create which is supported on Android kernels.
+          # This fixes "shm_open failed" crashes in drivers.
+          echo "Applying memfd/SHM patches..."
           sed -i 's/USE_POSIX_SHM/USE_MEMFD/g' src/util/os_file.c 2>/dev/null || true
           
-          # Fix for missing shm_open in some NDK-like environments
-          # This ensures that Gallium will fall back to memfd safely.
+          # 2. Add missing headers for memfd constants if needed
           sed -i '/#include <sys\/mman.h>/a #include <linux/memfd.h>' src/util/os_file.c 2>/dev/null || true
 
       - name: Configure Mesa (LLVMpipe)
         run: |
-          # Create a cross-file using the stable /usr/aarch64-linux-gnu sysroot
+          # Create a cross-file pointing to the official Ubuntu arm64 sysroot
           cat <<EOF > cross-aarch64.txt
           [binaries]
           c = 'aarch64-linux-gnu-gcc'
@@ -69,8 +70,9 @@ jobs:
           ar = 'aarch64-linux-gnu-ar'
           strip = 'aarch64-linux-gnu-strip'
           pkgconfig = 'aarch64-linux-gnu-pkg-config'
-          # We use a custom llvm-config wrapper to ensure it returns target paths
-          llvm-config = '/usr/bin/aarch64-linux-gnu-llvm-config-15'
+          # Use host llvm-config but point it to target paths via env vars if needed, 
+          # or let Meson handle it via the sysroot properties.
+          llvm-config = '/usr/bin/llvm-config-15'
 
           [host_machine]
           system = 'linux'
@@ -80,14 +82,8 @@ jobs:
 
           [properties]
           sys_root = '/usr/aarch64-linux-gnu'
-          # Tell pkg-config where to find the target libraries
           pkg_config_libdir = '/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
           EOF
-          
-          # Create the llvm-config-15 wrapper if it doesn't exist
-          if [ ! -f /usr/bin/aarch64-linux-gnu-llvm-config-15 ]; then
-            sudo ln -s /usr/lib/llvm-15/bin/llvm-config /usr/bin/aarch64-linux-gnu-llvm-config-15
-          fi
 
           meson setup build \
             --cross-file cross-aarch64.txt \
@@ -109,7 +105,7 @@ jobs:
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
-          # Winlator expects the driver to be named llvmpipe_dri.so in usr/lib
+          # Structure: usr/lib/llvmpipe_dri.so (Renamed from swrast for Winlator compatibility)
           mkdir -p output/opengl/usr/lib
           if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
             cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
@@ -117,16 +113,17 @@ jobs:
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Add symlink for compatibility
+          # Symlink for loader fallback
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
-          cd output/opengl && tar -cf - . | zstd -22 > ../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
+          cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
 
           # --- Vulkan LLVMpipe (Lavapipe) ---
+          # Structure: usr/lib/libvulkan_lvp.so + usr/share/vulkan/icd.d/lvp_icd.aarch64.json
           mkdir -p output/vulkan/usr/lib output/vulkan/usr/share/vulkan/icd.d
           cp build/src/gallium/targets/lavapipe/libvulkan_lvp.so output/vulkan/usr/lib/libvulkan_lvp.so
           
-          # Generate the ICD JSON (The critical "Mesa fix" for loading Vulkan software rendering on Android)
+          # Generate the ICD JSON Fix (Mandatory for loading software Vulkan on Android)
           cat <<EOF > output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
           {
               "file_format_version": "1.0.0",
