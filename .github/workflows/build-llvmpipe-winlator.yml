@@ -129,7 +129,7 @@ jobs:
           echo "==> Updating apt and installing mandatory build dependencies"
           apt-get update
           echo "==> Confirming base image glibc version"
-          ldd --version | head -n1
+          ldd --version | head -n1 || true
           apt-get install -y --no-install-recommends \
             ca-certificates curl xz-utils git \
             build-essential pkg-config cmake ninja-build \
@@ -192,7 +192,7 @@ jobs:
           # meson.build still specifically searches PATH for a program named
           # "glslangValidator" -- so install under that name regardless of
           # what the build actually produced.
-          GLSLANG_BIN="$(find build/StandAlone -maxdepth 1 -type f \( -name 'glslang' -o -name 'glslangValidator' \) | head -n1)"
+          GLSLANG_BIN="$(find build/StandAlone -maxdepth 1 -type f \( -name 'glslang' -o -name 'glslangValidator' \) | head -n1)" || true
           if [ -z "$GLSLANG_BIN" ]; then
             echo "FATAL: no glslang/glslangValidator binary found after build" >&2
             find build/StandAlone -maxdepth 1 -type f >&2
@@ -254,7 +254,7 @@ jobs:
           LIBDIR="/output/usr/lib"
           GL_SRC="$(find "$LIBDIR" -maxdepth 1 -name 'libGL.so.*' -type f | sort -V | tail -n1)"
           VK_SRC="${LIBDIR}/libvulkan_lvp.so"
-          ICD_SRC="$(find /output -path '*/share/vulkan/icd.d/*.json' | head -n1)"
+          ICD_SRC="$(find /output -path '*/share/vulkan/icd.d/*.json' | head -n1)" || true
 
           if [ -z "$GL_SRC" ] || [ ! -f "$GL_SRC" ]; then
             echo "FATAL: no libGL.so.* produced by the xlib GLX target" >&2
