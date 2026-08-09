@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-aarch64:
-    # Use Ubuntu 22.04 (Jammy) for stable cross-compilation
+    # Use Ubuntu 22.04 (Jammy) for stable and compatible cross-compilation
     runs-on: ubuntu-22.04
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -18,19 +18,22 @@ jobs:
       - name: Checkout Mesa
         run: |
           # Use official GitLab source to bypass GitHub mirror auth/404 issues
+          # This is the "Checkout Fix" requested
           git clone --depth 1 --branch mesa-${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git .
 
       - name: Setup Multi-arch and Install Dependencies
         run: |
           sudo dpkg --add-architecture arm64
           
-          # Fix: GitHub's default mirrors (azure.archive and security) DO NOT host arm64 packages.
-          # We MUST restrict them to amd64 and add ports.ubuntu.com which hosts arm64 (ports).
-          # This prevents the 404 errors seen in your previous logs.
-          sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's/^deb /deb [arch=amd64] /g' {} +
+          # Clean up problematic third-party lists to avoid "Malformed entry" errors
+          sudo rm -rf /etc/apt/sources.list.d/*
           
-          cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
+          # Create a clean multi-arch sources.list
+          # Standard mirrors for amd64, ports mirror for arm64
+          cat <<EOF | sudo tee /etc/apt/sources.list
+          deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
@@ -39,7 +42,7 @@ jobs:
           sudo apt-get update
           
           # Install cross-compiler and target architecture (arm64) libraries.
-          # We use LLVM 15 as it's the stable default for Jammy.
+          # Using LLVM 15 which is the stable version for Ubuntu 22.04 and compatible with Winlator glibc.
           sudo apt-get install -y \
             meson ninja-build build-essential flex bison pkg-config python3-mako \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
@@ -51,14 +54,17 @@ jobs:
 
       - name: Apply Mesa Fixes for Android/Winlator
         run: |
-          # 1. SHM/Memfd Fix: Android does not support POSIX SHM (/dev/shm).
-          # We force Mesa to use memfd_create which is supported on Android kernels.
-          # This fixes "shm_open failed" crashes in drivers.
-          echo "Applying memfd/SHM patches..."
+          # --- The "Mesa Fix" Step ---
+          # 1. SHM/Memfd Fix: Force use of memfd_create instead of shm_open.
+          # Android kernels do not mount /dev/shm, so standard POSIX SHM fails.
+          echo "Applying memfd/SHM optimization for Android compatibility..."
           sed -i 's/USE_POSIX_SHM/USE_MEMFD/g' src/util/os_file.c 2>/dev/null || true
           
-          # 2. Add missing headers for memfd constants if needed
+          # 2. Add missing headers for memfd constants
           sed -i '/#include <sys\/mman.h>/a #include <linux/memfd.h>' src/util/os_file.c 2>/dev/null || true
+          
+          # 3. Disable platform checks that might fail in cross-build
+          sed -i 's/detect_pci_device/false/g' src/gallium/auxiliary/util/u_cpu_detect.c 2>/dev/null || true
 
       - name: Configure Mesa (LLVMpipe)
         run: |
@@ -70,8 +76,7 @@ jobs:
           ar = 'aarch64-linux-gnu-ar'
           strip = 'aarch64-linux-gnu-strip'
           pkgconfig = 'aarch64-linux-gnu-pkg-config'
-          # Use host llvm-config but point it to target paths via env vars if needed, 
-          # or let Meson handle it via the sysroot properties.
+          # Use the versioned llvm-config for Ubuntu 22.04
           llvm-config = '/usr/bin/llvm-config-15'
 
           [host_machine]
@@ -105,7 +110,7 @@ jobs:
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
-          # Structure: usr/lib/llvmpipe_dri.so (Renamed from swrast for Winlator compatibility)
+          # Winlator expects the driver to be named llvmpipe_dri.so in usr/lib
           mkdir -p output/opengl/usr/lib
           if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
             cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
@@ -113,17 +118,18 @@ jobs:
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Symlink for loader fallback
+          # Add symlink for loader fallback compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
 
           # --- Vulkan LLVMpipe (Lavapipe) ---
-          # Structure: usr/lib/libvulkan_lvp.so + usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          # Winlator expects lvp_icd.aarch64.json in usr/share/vulkan/icd.d/
           mkdir -p output/vulkan/usr/lib output/vulkan/usr/share/vulkan/icd.d
           cp build/src/gallium/targets/lavapipe/libvulkan_lvp.so output/vulkan/usr/lib/libvulkan_lvp.so
           
-          # Generate the ICD JSON Fix (Mandatory for loading software Vulkan on Android)
+          # Generate the ICD JSON (The critical fix for loading software Vulkan on Android)
+          # library_path must be relative to the extraction root
           cat <<EOF > output/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
           {
               "file_format_version": "1.0.0",
