@@ -39,6 +39,12 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     from upstream source via its own CMake+Ninja flow (never a bare `make`
 #     invocation, which is what broke the earlier turnip pipeline) and
 #     installed to /usr/local/bin, which sits ahead of /usr/bin on PATH.
+#     Upstream's standalone binary is itself named "glslang" now (the old
+#     "glslangValidator" name was dropped), so it's installed under the
+#     "glslangValidator" filename Mesa's meson.build actually searches for.
+#     Its own test suite and unused SPIRV-Tools CLI tools are disabled via
+#     CMake flags to keep this step from eating the job's time budget under
+#     QEMU emulation.
 #   - -Dglx=xlib is the key option: it embeds the llvmpipe gallium driver
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
@@ -79,7 +85,7 @@ env:
 jobs:
   build-llvmpipe-lavapipe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -161,11 +167,23 @@ jobs:
           git clone --depth 1 https://github.com/KhronosGroup/glslang.git /tmp/glslang
           cd /tmp/glslang
           python3 update_glslang_sources.py
-          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_CTEST=OFF \
+            -DSPIRV_SKIP_TESTS=ON \
+            -DSPIRV_SKIP_EXECUTABLES=ON \
+            -DENABLE_SPVREMAPPER=OFF \
+            -DENABLE_GLSLANG_BINARIES=ON
           ninja -C build
-          GLSLANG_BIN="$(find build -type f -name 'glslangValidator' | head -n1)"
+          # Upstream glslang renamed its standalone binary from
+          # "glslangValidator" to "glslang" some time ago, but Mesa's
+          # meson.build still specifically searches PATH for a program named
+          # "glslangValidator" -- so install under that name regardless of
+          # what the build actually produced.
+          GLSLANG_BIN="$(find build/StandAlone -maxdepth 1 -type f \( -name 'glslang' -o -name 'glslangValidator' \) | head -n1)"
           if [ -z "$GLSLANG_BIN" ]; then
-            echo "FATAL: glslangValidator binary not found after build" >&2
+            echo "FATAL: no glslang/glslangValidator binary found after build" >&2
+            find build/StandAlone -maxdepth 1 -type f >&2
             exit 1
           fi
           install -Dm755 "$GLSLANG_BIN" /usr/local/bin/glslangValidator
