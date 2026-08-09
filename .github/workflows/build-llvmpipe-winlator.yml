@@ -17,19 +17,26 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     (docker/setup-qemu-action), not manual dpkg --add-architecture cross-compiling.
 #     This avoids "llvm-config is an arm64 ELF binary and can't run on the amd64
 #     runner" entirely, since under emulation it runs as a true native binary.
-#   - Base image is ubuntu:23.10 (mantic), which ships glibc 2.38 EXACTLY --
-#     matching the version Winlator Official's own glibc environment is
-#     understood to use, per direct investigation of the target. Note this
-#     is a version match only: termux-pacman's own glibc toolchain (a
-#     different, related but distinct thing) hard-patches GCC's linker to
-#     bake in Termux's own install prefix (/data/data/com.termux/files/usr)
-#     instead of standard /lib and /usr/lib paths. Building against that
-#     toolchain directly would import Termux's path assumptions, which do
-#     NOT match Winlator's own rootDir-relative filesystem layout -- so this
-#     workflow matches the glibc *version* via stock Ubuntu 23.10 rather
-#     than adopting termux-pacman's patched toolchain wholesale. mantic is
-#     EOL, but its arm64 packages remain live on ports.ubuntu.com (verified),
-#     so this does not need old-releases.ubuntu.com or any other workaround.
+#   - Base image is ubuntu:22.04 (jammy), a currently-supported LTS with
+#     packages verifiably live on ports.ubuntu.com (unlike ubuntu:23.10
+#     "mantic", which this workflow tried in an earlier iteration -- mantic
+#     is EOL and BOTH ports.ubuntu.com and old-releases.ports.ubuntu.com
+#     404 on it, so that path was abandoned rather than guessing a third
+#     unverifiable archive URL). jammy ships glibc 2.35, which is NOT an
+#     exact match for the glibc 2.38 Winlator Official is understood to use
+#     -- but glibc is backward compatible (a 2.35-linked binary loads fine
+#     on a 2.38 system, since 2.35's symbol versions are a strict subset of
+#     2.38's), so this does not reintroduce the ABI problem that motivated
+#     moving off ubuntu:24.04 in an earlier iteration (glibc 2.39, which is
+#     NEWER than the target and therefore NOT guaranteed to be a subset).
+#     Note also that termux-pacman's own glibc toolchain (a different,
+#     related but distinct thing from "glibc 2.38" as a bare version
+#     number) hard-patches GCC's linker to bake in Termux's own install
+#     prefix (/data/data/com.termux/files/usr) instead of standard /lib and
+#     /usr/lib paths -- building against that toolchain directly would
+#     import Termux's path assumptions, which do NOT match Winlator's own
+#     rootDir-relative filesystem layout, so it was deliberately not adopted
+#     even before the mantic archive dead-end appeared.
 #   - -Dshared-llvm=false is MANDATORY. Without it, Mesa links against the
 #     shared libLLVM-*.so provided by llvm-dev, and Winlator's rootfs does not
 #     ship that library at all -- so libGL/libvulkan_lvp fail to dlopen for
@@ -42,7 +49,7 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     compression, instead of adding an extra libzstd.so.1 runtime dependency
 #     that may not exist in Winlator's rootfs.
 #   - glslang-tools is installed via apt for its runtime shared libs, but the
-#     glslangValidator BINARY it provides is too old for Mesa 26.x's
+#     glslangValidator BINARY it provides on jammy is too old for Mesa 26.x's
 #     hard `glslang >= 12.2` requirement. A current glslangValidator is built
 #     from upstream source via its own CMake+Ninja flow (never a bare `make`
 #     invocation, which is what broke the earlier turnip pipeline) and
@@ -66,9 +73,9 @@ on:
         required: true
         default: "26.0.0"
       llvm_major:
-        description: "LLVM major version to build against (mantic ships 16 by default, 17 in archive)"
+        description: "LLVM major version to build against (jammy ships 15 in its own repos, matching this ABI baseline)"
         required: true
-        default: "16"
+        default: "15"
       vulkan_api_version:
         description: "api_version field written into the lavapipe ICD json"
         required: true
@@ -80,7 +87,7 @@ on:
 
 env:
   MESA_VERSION: ${{ github.event.inputs.mesa_version || '26.0.0' }}
-  LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '16' }}
+  LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '15' }}
   VULKAN_API_VERSION: ${{ github.event.inputs.vulkan_api_version || '1.4.335' }}
   ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/imagefs/usr/lib/libvulkan_lvp.so' }}
   TARGET_TRIPLE: aarch64-linux-gnu
@@ -120,14 +127,8 @@ jobs:
           ICD_LIBRARY_PATH="${ICD_LIBRARY_PATH:?}"
 
           echo "==> Updating apt and installing mandatory build dependencies"
-          # mantic (23.10) is EOL: ports.ubuntu.com has fully purged it (404
-          # on Release files), so apt must be pointed at the EOL archive
-          # instead. old-releases.ports.ubuntu.com is the ports-architecture
-          # equivalent of old-releases.ubuntu.com (which only serves
-          # amd64/i386, not arm64).
-          sed -i 's|ports.ubuntu.com|old-releases.ports.ubuntu.com|g' /etc/apt/sources.list
           apt-get update
-          echo "==> Confirming base image glibc version (should be 2.38 for mantic)"
+          echo "==> Confirming base image glibc version"
           ldd --version | head -n1
           apt-get install -y --no-install-recommends \
             ca-certificates curl xz-utils git \
@@ -146,30 +147,30 @@ jobs:
             libx11-xcb-dev libxcb-keysyms1-dev \
             libxshmfence-dev libxxf86vm-dev libxrandr-dev
 
-          # Mesa 26.x needs a meson newer than what this base image packages, so pin a
+          # Mesa 26.x needs a meson newer than what jammy packages, so pin a
           # known-good modern meson via pip, installed straight into the
           # system interpreter. Deliberately NOT using `python3 -m venv`,
-          # since that needs a separate python3-venv-style package
+          # since that needs the separate python3.10-venv package
           # (ensurepip) which isn't installed by default and would be one
           # more thing to keep in sync.
           echo "==> Installing pinned meson via pip (system interpreter)"
           # Deliberately NOT running "pip install --upgrade pip" first: the
           # apt-installed pip has no RECORD metadata (it's a dpkg-managed
           # file set), so pip's self-uninstall step during an upgrade fails
-          # with "Cannot uninstall pip <ver>, RECORD file not found" on some bases.
+          # with "Cannot uninstall pip 22.0.2, RECORD file not found".
           # Also deliberately NOT passing --break-system-packages: that flag
-          # only exists on pip 23.0.1+ (PEP 668 support); older pip errors with
-          # "no such option" if you pass it, and this base has no PEP 668
-          # "externally managed environment" guard in the first place, so a
-          # plain install is correct and portable here.
+          # only exists on pip 23.0.1+ (PEP 668 support), and jammy ships
+          # pip 22.0.2, which errors with "no such option" if you pass it.
+          # jammy has no PEP 668 "externally managed environment" guard in
+          # the first place, so a plain install is correct here.
           python3 -m pip install "meson>=1.4,<2.0"
           hash -r
           meson --version
 
           echo "==> Building glslangValidator from source"
-          # this base's glslang-tools apt package satisfies availability but not
+          # jammy's glslang-tools apt package satisfies availability but not
           # Mesa 26.x's version floor (meson.build hard-requires >= 12.2;
-          # the packaged build reports older than that). Building from
+          # jammy's packaged build reports older than that). Building from
           # upstream's own CMake+Ninja flow (not a bare `make` invocation,
           # which is what broke the earlier turnip pipeline) avoids both
           # problems at once. Installing to /usr/local/bin means it's found
@@ -328,7 +329,7 @@ jobs:
           BUILD_SCRIPT
           chmod +x "${{ github.workspace }}/build.sh"
 
-      - name: Build inside emulated aarch64 ubuntu:23.10 container
+      - name: Build inside emulated aarch64 ubuntu:22.04 container
         run: |
           docker run --rm \
             --platform linux/arm64 \
@@ -338,7 +339,7 @@ jobs:
             -e ICD_LIBRARY_PATH="${{ env.ICD_LIBRARY_PATH }}" \
             -v "${{ github.workspace }}/build.sh:/build.sh:ro" \
             -v "${{ github.workspace }}/artifacts:/artifacts" \
-            ubuntu:23.10 \
+            ubuntu:22.04 \
             bash /build.sh
 
       - name: Verify both archives are well-formed with correct file counts
