@@ -64,6 +64,19 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
 #     self-contained libGL file with no DRI search-path plumbing needed.
+#   - -Ddri3=disabled is MANDATORY, confirmed by directly inspecting files
+#     pulled from Winlator Official's actual rootfs. Its libc.so.6, ld.so
+#     and libX11.so.6 are all present and ABI-compatible with a jammy-built
+#     driver (their glibc exports up to GLIBC_2.39 and GCC_13.0 symbols,
+#     both supersets of what this build requires -- ABI version was never
+#     the blocker). But DRI3 support pulls in libxcb-dri3, libxcb-present,
+#     libxcb-sync, libxcb-shm and libX11-xcb as extra runtime dependencies,
+#     and DRI3 exists specifically for zero-copy buffer sharing with a real
+#     DRM/GPU device. Winlator's X server is a custom Java implementation
+#     with no real DRM device behind it, so those libraries are almost
+#     certainly absent from its rootfs -- which is consistent with every
+#     previous build silently failing to load despite passing every other
+#     ABI check. Disabling dri3 removes that entire dependency chain.
 
 on:
   workflow_dispatch:
@@ -230,6 +243,7 @@ jobs:
             -Dgallium-drivers=llvmpipe \
             -Dvulkan-drivers=swrast \
             -Dglx=xlib \
+            -Ddri3=disabled \
             -Degl=disabled \
             -Dgbm=disabled \
             -Dopengl=true \
