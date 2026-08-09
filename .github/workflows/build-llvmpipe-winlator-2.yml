@@ -72,17 +72,17 @@ jobs:
           
           # 1. Pkg-Config Wrapper (Essential for finding arm64 libs)
           cat <<EOF | sudo tee /usr/bin/aarch64-linux-gnu-pkg-config
-#!/bin/bash
-export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-exec pkg-config "\$@"
-EOF
+          #!/bin/bash
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          exec pkg-config "\$@"
+          EOF
           sudo chmod +x /usr/bin/aarch64-linux-gnu-pkg-config
 
           # 2. LLVM Config Wrapper
           cat <<EOF | sudo tee /usr/bin/aarch64-llvm-config
-#!/bin/bash
-/usr/bin/llvm-config-17 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
-EOF
+          #!/bin/bash
+          /usr/bin/llvm-config-17 "\$@" | sed 's|-L/usr/lib/x86_64-linux-gnu|-L/usr/lib/aarch64-linux-gnu|g'
+          EOF
           sudo chmod +x /usr/bin/aarch64-llvm-config
 
           # Create the cross-file pointing to the arm64 environment
@@ -130,7 +130,6 @@ EOF
           ninja -C build
           
           # --- OpenGL LLVMpipe ---
-          # Winlator expects llvmpipe_dri.so in usr/lib
           mkdir -p output/opengl/usr/lib
           if [ -f build/src/gallium/targets/dri/swrast_dri.so ]; then
             cp build/src/gallium/targets/dri/swrast_dri.so output/opengl/usr/lib/llvmpipe_dri.so
@@ -138,7 +137,7 @@ EOF
             cp build/src/gallium/targets/dri/libgallium_dri.so output/opengl/usr/lib/llvmpipe_dri.so
           fi
           
-          # Add symlink for compatibility
+          # Add symlink for loader compatibility
           ln -s llvmpipe_dri.so output/opengl/usr/lib/swrast_dri.so
           
           cd output/opengl && tar -cf - . | zstd -22 > ../../llvmpipe-opengl-${{ github.event.inputs.mesa_version }}.tzst && cd ..
