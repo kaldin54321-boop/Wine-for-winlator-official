@@ -431,7 +431,7 @@ jobs:
             ubuntu:22.04 \
             bash /build.sh
 
-      - name: Verify both archives are well-formed with correct file counts
+      - name: Verify both archives are well-formed and contain the mandatory files
         run: |
           VK_FILE="artifacts/llvmpipe-vulkan-${{ env.MESA_VERSION }}.tzst"
           GL_FILE="artifacts/llvmpipe-opengl-${{ env.MESA_VERSION }}.tzst"
@@ -439,20 +439,36 @@ jobs:
             test -s "$FILE"
             zstd -t "$FILE"
           done
-          VK_COUNT="$(tar --zstd -tf "$VK_FILE" | wc -l)"
-          GL_COUNT="$(tar --zstd -tf "$GL_FILE" | wc -l)"
-          if [ "$VK_COUNT" -ne 2 ]; then
-            echo "FATAL: vulkan archive has ${VK_COUNT} entries, expected 2" >&2
-            tar --zstd -tvf "$VK_FILE"
+
+          # Entry counts are no longer fixed: the build script conditionally
+          # bundles libtinfo.so.6 and/or libsensors.so.5 alongside the driver
+          # if (and only if) the produced binary actually needs them, so a
+          # vulkan archive can legitimately have 2, 3, or 4 entries (driver +
+          # icd json + 0-2 bundled deps), and opengl 1, 2, or 3. Check for the
+          # MANDATORY files' presence instead of an exact count.
+          VK_LISTING="$(tar --zstd -tf "$VK_FILE")"
+          GL_LISTING="$(tar --zstd -tf "$GL_FILE")"
+
+          if ! echo "$VK_LISTING" | grep -qx 'usr/lib/libvulkan_lvp.so'; then
+            echo "FATAL: vulkan archive is missing usr/lib/libvulkan_lvp.so" >&2
+            echo "$VK_LISTING" >&2
             exit 1
           fi
-          if [ "$GL_COUNT" -ne 1 ]; then
-            echo "FATAL: opengl archive has ${GL_COUNT} entries, expected 1" >&2
-            tar --zstd -tvf "$GL_FILE"
+          if ! echo "$VK_LISTING" | grep -qx 'usr/share/vulkan/icd.d/lvp_icd.aarch64.json'; then
+            echo "FATAL: vulkan archive is missing the ICD json" >&2
+            echo "$VK_LISTING" >&2
             exit 1
           fi
-          echo "vulkan archive OK: $(du -h "$VK_FILE" | cut -f1), 2 entries"
-          echo "opengl archive OK: $(du -h "$GL_FILE" | cut -f1), 1 entry"
+          if ! echo "$GL_LISTING" | grep -qx 'usr/lib/libGL.so.1.7.0'; then
+            echo "FATAL: opengl archive is missing usr/lib/libGL.so.1.7.0" >&2
+            echo "$GL_LISTING" >&2
+            exit 1
+          fi
+
+          echo "vulkan archive OK: $(du -h "$VK_FILE" | cut -f1)"
+          echo "$VK_LISTING"
+          echo "opengl archive OK: $(du -h "$GL_FILE" | cut -f1)"
+          echo "$GL_LISTING"
 
       - name: Diagnose ABI compatibility of produced binaries
         run: |
