@@ -11,6 +11,13 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     usr/lib/libGL.so.1.7.0  -> llvmpipe, statically linked into classic
 #                                libGL (Xlib GLX target, NOT a separate
 #                                dri/*.so plugin)
+# Each archive may ALSO conditionally contain usr/lib/libtinfo.so.6 and/or
+# usr/lib/libsensors.so.5 -- private bundled copies, added automatically
+# only if the produced binary actually links against them (detected via
+# readelf after the build). Confirmed by direct inspection of Winlator
+# Official's rootfs: every other runtime dependency this driver needs is
+# present there, but those two specifically are not, so this is a
+# self-healing step rather than a hardcoded assumption either way.
 #
 # Design notes:
 #   - Builds run INSIDE a real aarch64 container via QEMU user-mode emulation
@@ -64,19 +71,21 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
 #     self-contained libGL file with no DRI search-path plumbing needed.
-#   - -Ddri3=disabled is MANDATORY, confirmed by directly inspecting files
-#     pulled from Winlator Official's actual rootfs. Its libc.so.6, ld.so
-#     and libX11.so.6 are all present and ABI-compatible with a jammy-built
-#     driver (their glibc exports up to GLIBC_2.39 and GCC_13.0 symbols,
-#     both supersets of what this build requires -- ABI version was never
-#     the blocker). But DRI3 support pulls in libxcb-dri3, libxcb-present,
-#     libxcb-sync, libxcb-shm and libX11-xcb as extra runtime dependencies,
-#     and DRI3 exists specifically for zero-copy buffer sharing with a real
-#     DRM/GPU device. Winlator's X server is a custom Java implementation
-#     with no real DRM device behind it, so those libraries are almost
-#     certainly absent from its rootfs -- which is consistent with every
-#     previous build silently failing to load despite passing every other
-#     ABI check. Disabling dri3 removes that entire dependency chain.
+#   - -Ddri3 does NOT exist as a meson option in Mesa 26.x -- it was removed
+#     upstream as of the 25.0.0 release. An earlier iteration of this
+#     workflow tried to pass it to shrink the XCB dependency footprint
+#     (libxcb-dri3, libxcb-present, libxcb-sync, libxcb-shm, libX11-xcb),
+#     which broke `meson setup` outright ("Unknown option: dri3"). It's
+#     removed here. Note this isn't just a syntax fix: even where that
+#     option used to exist, it only controlled the OLD-STYLE GLX/DRI2-3
+#     loader, not Vulkan's X11 WSI code (src/vulkan/wsi/wsi_common_x11.c),
+#     which links those same XCB submodules unconditionally whenever X11
+#     Vulkan surface support is compiled in -- so disabling it would likely
+#     not have removed the runtime dependency anyway. Whether those XCB
+#     submodules are actually present or absent in Winlator's rootfs is
+#     still unconfirmed; it was inferred (not verified) from an earlier
+#     rootfs dump that was pulled for an unrelated purpose (checking the
+#     glibc version), not as a complete library inventory.
 
 on:
   workflow_dispatch:
@@ -243,7 +252,6 @@ jobs:
             -Dgallium-drivers=llvmpipe \
             -Dvulkan-drivers=swrast \
             -Dglx=xlib \
-            -Ddri3=disabled \
             -Degl=disabled \
             -Dgbm=disabled \
             -Dopengl=true \
@@ -296,6 +304,71 @@ jobs:
           cp -a "$GL_SRC" /pkg/opengl/usr/lib/libGL.so.1.7.0
           cp -a "$VK_SRC" /pkg/vulkan/usr/lib/libvulkan_lvp.so
 
+          echo "==> Checking for libtinfo/libsensors and bundling private copies if needed"
+          # Confirmed via direct inspection of Winlator Official's rootfs:
+          # libtinfo.so.6 and libsensors.so.5 are NOT present there (every
+          # other runtime dependency was individually verified present).
+          # Rather than guess whether OUR specific build actually links
+          # against either one (a different llvmpipe build might have for
+          # different reasons -- e.g. a differently-configured static LLVM),
+          # detect it directly from the produced binaries and, if so, bundle
+          # a private copy alongside our own driver files. This is safe
+          # because our own .so files are necessarily already being found on
+          # Winlator's library search path (LD_LIBRARY_PATH covers wherever
+          # these archives get extracted to) -- co-locating a private copy of
+          # a missing dependency there is a standard, well-established
+          # technique and does not require Winlator's rootfs to ship it.
+          mkdir -p /tmp/extra-libs
+          NEEDS_TINFO_GL=0; NEEDS_TINFO_VK=0
+          NEEDS_SENSORS_GL=0; NEEDS_SENSORS_VK=0
+          if readelf -d /pkg/opengl/usr/lib/libGL.so.1.7.0 | grep -q 'NEEDED.*libtinfo\.so\.6'; then
+            NEEDS_TINFO_GL=1
+          fi
+          if readelf -d /pkg/vulkan/usr/lib/libvulkan_lvp.so | grep -q 'NEEDED.*libtinfo\.so\.6'; then
+            NEEDS_TINFO_VK=1
+          fi
+          if readelf -d /pkg/opengl/usr/lib/libGL.so.1.7.0 | grep -q 'NEEDED.*libsensors\.so\.5'; then
+            NEEDS_SENSORS_GL=1
+          fi
+          if readelf -d /pkg/vulkan/usr/lib/libvulkan_lvp.so | grep -q 'NEEDED.*libsensors\.so\.5'; then
+            NEEDS_SENSORS_VK=1
+          fi
+
+          echo "libGL needs libtinfo: ${NEEDS_TINFO_GL}, libsensors: ${NEEDS_SENSORS_GL}"
+          echo "libvulkan_lvp needs libtinfo: ${NEEDS_TINFO_VK}, libsensors: ${NEEDS_SENSORS_VK}"
+
+          if [ "$NEEDS_TINFO_GL" = "1" ] || [ "$NEEDS_TINFO_VK" = "1" ]; then
+            apt-get download libtinfo6
+            dpkg-deb -x libtinfo6_*.deb /tmp/extra-libs
+            TINFO_SRC="$(find /tmp/extra-libs -name 'libtinfo.so.6' | head -n1)" || true
+            if [ -z "$TINFO_SRC" ]; then
+              echo "FATAL: libtinfo6 .deb did not contain libtinfo.so.6" >&2
+              exit 1
+            fi
+            if [ "$NEEDS_TINFO_GL" = "1" ]; then
+              cp -L "$TINFO_SRC" /pkg/opengl/usr/lib/libtinfo.so.6
+            fi
+            if [ "$NEEDS_TINFO_VK" = "1" ]; then
+              cp -L "$TINFO_SRC" /pkg/vulkan/usr/lib/libtinfo.so.6
+            fi
+          fi
+
+          if [ "$NEEDS_SENSORS_GL" = "1" ] || [ "$NEEDS_SENSORS_VK" = "1" ]; then
+            apt-get download libsensors5
+            dpkg-deb -x libsensors5_*.deb /tmp/extra-libs
+            SENSORS_SRC="$(find /tmp/extra-libs -name 'libsensors.so.5' | head -n1)" || true
+            if [ -z "$SENSORS_SRC" ]; then
+              echo "FATAL: libsensors5 .deb did not contain libsensors.so.5" >&2
+              exit 1
+            fi
+            if [ "$NEEDS_SENSORS_GL" = "1" ]; then
+              cp -L "$SENSORS_SRC" /pkg/opengl/usr/lib/libsensors.so.5
+            fi
+            if [ "$NEEDS_SENSORS_VK" = "1" ]; then
+              cp -L "$SENSORS_SRC" /pkg/vulkan/usr/lib/libsensors.so.5
+            fi
+          fi
+
           cat > /pkg/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json <<EOF
           {
               "ICD": {
@@ -309,28 +382,30 @@ jobs:
           echo "==> Verifying each package's file count"
           VK_COUNT="$(find /pkg/vulkan -type f | wc -l)"
           GL_COUNT="$(find /pkg/opengl -type f | wc -l)"
-          if [ "$VK_COUNT" -ne 2 ]; then
-            echo "FATAL: vulkan package expected 2 files, found ${VK_COUNT}" >&2
+          # Baseline is 2 files for vulkan (driver + icd json), 1 for opengl
+          # (driver), plus one extra file for each of libtinfo/libsensors
+          # that got conditionally bundled above.
+          VK_EXPECTED=$((2 + NEEDS_TINFO_VK + NEEDS_SENSORS_VK))
+          GL_EXPECTED=$((1 + NEEDS_TINFO_GL + NEEDS_SENSORS_GL))
+          if [ "$VK_COUNT" -ne "$VK_EXPECTED" ]; then
+            echo "FATAL: vulkan package expected ${VK_EXPECTED} files, found ${VK_COUNT}" >&2
             find /pkg/vulkan -type f >&2
             exit 1
           fi
-          if [ "$GL_COUNT" -ne 1 ]; then
-            echo "FATAL: opengl package expected 1 file, found ${GL_COUNT}" >&2
+          if [ "$GL_COUNT" -ne "$GL_EXPECTED" ]; then
+            echo "FATAL: opengl package expected ${GL_EXPECTED} files, found ${GL_COUNT}" >&2
             find /pkg/opengl -type f >&2
             exit 1
           fi
 
           echo "==> Packaging as two .tzst archives"
           cd /pkg/vulkan
-          tar --zstd -cf "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst" \
-            usr/lib/libvulkan_lvp.so \
-            usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          tar --zstd -cf "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst" $(find . -type f -printf '%P\n')
           sha256sum "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst" \
             > "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst.sha256"
 
           cd /pkg/opengl
-          tar --zstd -cf "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst" \
-            usr/lib/libGL.so.1.7.0
+          tar --zstd -cf "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst" $(find . -type f -printf '%P\n')
           sha256sum "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst" \
             > "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst.sha256"
 
