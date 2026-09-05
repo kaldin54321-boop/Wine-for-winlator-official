@@ -1,9 +1,10 @@
-name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
+name: Build llvmpipe/lavapipe for Winlator Frost v3 (aarch64 glibc)
 
-# Produces TWO separate archives, matching exactly what Winlator Official's
-# XServerDisplayActivity.extractGraphicsDriverFiles() actually extracts --
-# it treats the Vulkan renderer slot and OpenGL renderer slot as
-# independently selectable, so it never extracts one combined archive:
+# Produces TWO separate archives, matching exactly what this project's
+# XServerDisplayActivity.extractGraphicsDriverFiles() extracts -- it treats
+# the Vulkan renderer slot and OpenGL renderer slot as independently
+# selectable (Vulkan: Turnip/Vortek/LLVMPipe, OpenGL: Zink/VirGL/Gladio/LLVMPipe),
+# so it never extracts one combined archive:
 #   llvmpipe-vulkan-<version>.tzst
 #     usr/lib/libvulkan_lvp.so                    -> lavapipe Vulkan ICD driver
 #     usr/share/vulkan/icd.d/lvp_icd.aarch64.json -> Vulkan loader manifest
@@ -14,78 +15,89 @@ name: Build llvmpipe/lavapipe for Winlator (aarch64 glibc)
 # Each archive may ALSO conditionally contain usr/lib/libtinfo.so.6 and/or
 # usr/lib/libsensors.so.5 -- private bundled copies, added automatically
 # only if the produced binary actually links against them (detected via
-# readelf after the build). Confirmed by direct inspection of Winlator
-# Official's rootfs: every other runtime dependency this driver needs is
-# present there, but those two specifically are not, so this is a
-# self-healing step rather than a hardcoded assumption either way.
+# readelf after the build).
 #
-# Design notes:
+# Frost-v3 integration (see GraphicsDrivers.LLVMPIPE, DefaultVersion.LLVMPIPE,
+# XServerDisplayActivity.extractGraphicsDriverFiles):
+#   - Vulkan slot "LLVMPipe" extracts
+#       assets/graphics_driver/llvmpipe-vulkan-<DefaultVersion.LLVMPIPE>.tzst
+#     into RootFS rootDir (<files>/rootfs). No GALLIUM_DRIVER override; the ICD
+#     manifest selects lavapipe. WSI present mode follows this project's Turnip
+#     policy (mailbox).
+#   - OpenGL slot "LLVMPipe" extracts
+#       assets/graphics_driver/llvmpipe-opengl-<DefaultVersion.LLVMPIPE>.tzst
+#     into the same rootDir. No GALLIUM_DRIVER override (llvmpipe is the only
+#     gallium driver compiled into this libGL, so the default is correct) and
+#     no MESA_GL_VERSION_OVERRIDE (that override is Vortek+zink specific).
+#     The Vulkan slot extracts first, then the OpenGL slot, so mixed combos
+#     (e.g. Turnip Vulkan + LLVMPipe OpenGL) end with the right libGL.
+#   - DefaultVersion.DXVK() treats llvmpipe like turnip (lavapipe exposes
+#     Vulkan 1.4 -> MAJOR_DXVK).
+#   - Place the two produced .tzst files under
+#       app/app/src/main/assets/graphics_driver/
+#     (aaptOptions already has noCompress for tzst, so no gradle change needed).
+#
+# Frost-v3 vs alexvorxx/winlator differences verified during the port:
+#   - RootFS layout: frost-v3 serves the guest FS from
+#       /data/data/com.winlator/files/rootfs   (RootFS.getRootDir(),
+#       RootFS.getLibDir() = <rootfs>/usr/lib)
+#     while alexvorxx/winlator serves it from
+#       /data/data/com.winlator/files/imagefs  (ImageFs.getRootDir()).
+#     The ICD library_path default below therefore points at the rootfs path.
+#     A manifest baked with the imagefs path would make the Vulkan loader look
+#     in a directory that does not exist on frost-v3, so lavapipe would
+#     silently never enumerate. This is the single most important frost-v3
+#     specific fix in this file.
+#   - Driver selection model: alexvorxx/winlator uses ONE combined
+#     graphicsDriver string ("llvmpipe", "turnip", ...) backed by a SINGLE
+#     combined llvmpipe-26.0.0.tzst archive containing both GL and Vulkan
+#     files. Frost-v3 uses TWO independent slots (vulkan,opengl), so the
+#     combined archive can never be extracted correctly here -- hence the two
+#     split archives this workflow produces, and the two LLVMPipe entries
+#     (one per slot) in GraphicsDrivers.getItems().
+#   - Env-var ownership: alexvorxx sets DXVK/VKD3D + vkbasalt + use_dri3 env
+#     inside its llvmpipe branch. In frost-v3, DXVK/VKD3D env is owned by
+#     extractDXWrapperFiles(), and there is no use_dri3 preference, so the
+#     ported branch only sets the WSI present mode.
+#   - Bug fix vs the draft this file was based on: the libsensors bundling
+#     copy for the opengl package was missing the filename join
+#     (destination was the directory plus a stray second operand), which would
+#     have dropped libsensors.so.5 into the container's working directory
+#     instead of the package whenever only the GL binary needed it. Fixed here.
+#
+# Design notes (inherited, still true):
 #   - Builds run INSIDE a real aarch64 container via QEMU user-mode emulation
 #     (docker/setup-qemu-action), not manual dpkg --add-architecture cross-compiling.
 #     This avoids "llvm-config is an arm64 ELF binary and can't run on the amd64
 #     runner" entirely, since under emulation it runs as a true native binary.
-#   - Base image is ubuntu:22.04 (jammy), a currently-supported LTS with
-#     packages verifiably live on ports.ubuntu.com (unlike ubuntu:23.10
-#     "mantic", which this workflow tried in an earlier iteration -- mantic
-#     is EOL and BOTH ports.ubuntu.com and old-releases.ports.ubuntu.com
-#     404 on it, so that path was abandoned rather than guessing a third
-#     unverifiable archive URL). jammy ships glibc 2.35, which is NOT an
-#     exact match for the glibc 2.38 Winlator Official is understood to use
-#     -- but glibc is backward compatible (a 2.35-linked binary loads fine
-#     on a 2.38 system, since 2.35's symbol versions are a strict subset of
-#     2.38's), so this does not reintroduce the ABI problem that motivated
-#     moving off ubuntu:24.04 in an earlier iteration (glibc 2.39, which is
-#     NEWER than the target and therefore NOT guaranteed to be a subset).
-#     Note also that termux-pacman's own glibc toolchain (a different,
-#     related but distinct thing from "glibc 2.38" as a bare version
-#     number) hard-patches GCC's linker to bake in Termux's own install
-#     prefix (/data/data/com.termux/files/usr) instead of standard /lib and
-#     /usr/lib paths -- building against that toolchain directly would
-#     import Termux's path assumptions, which do NOT match Winlator's own
-#     rootDir-relative filesystem layout, so it was deliberately not adopted
-#     even before the mantic archive dead-end appeared.
+#   - Base image is ubuntu:22.04 (jammy). jammy ships glibc 2.35 -- glibc is
+#     backward compatible (a 2.35-linked binary loads fine on a newer system,
+#     since 2.35's symbol versions are a strict subset), whereas building on
+#     ubuntu:24.04 (glibc 2.39) risks requiring symbol versions newer than the
+#     target rootfs provides. The ABI diagnostic step at the end prints the
+#     actual max GLIBC/GLIBCXX versions required so this can be re-checked if
+#     the rootfs glibc ever changes.
 #   - -Dshared-llvm=false is MANDATORY. Without it, Mesa links against the
-#     shared libLLVM-*.so provided by llvm-dev, and Winlator's rootfs does not
-#     ship that library at all -- so libGL/libvulkan_lvp fail to dlopen for
-#     exactly the same "silent failure, blank GPU info" reason as the glibc
-#     mismatch above. Statically linking LLVM's component libraries into the
-#     driver removes that runtime dependency entirely (at the cost of a much
-#     larger .so, which is expected and correct).
-#   - -Dzstd=disabled: falls back to zlib (which is a near-universal baseline
-#     dependency and already required unconditionally by Mesa) for disk-cache
-#     compression, instead of adding an extra libzstd.so.1 runtime dependency
-#     that may not exist in Winlator's rootfs.
+#     shared libLLVM-*.so provided by llvm-dev, and the rootfs does not ship
+#     that library at all -- so libGL/libvulkan_lvp fail to dlopen with a
+#     silent failure / blank GPU info. Statically linking LLVM's component
+#     libraries into the driver removes that runtime dependency entirely (at
+#     the cost of a much larger .so, which is expected and correct).
+#   - -Dzstd=disabled: falls back to zlib for disk-cache compression instead
+#     of adding an extra libzstd.so.1 runtime dependency.
 #   - glslang-tools is installed via apt for its runtime shared libs, but the
 #     glslangValidator BINARY it provides on jammy is too old for Mesa 26.x's
 #     hard `glslang >= 12.2` requirement. A current glslangValidator is built
-#     from upstream source via its own CMake+Ninja flow (never a bare `make`
-#     invocation, which is what broke the earlier turnip pipeline) and
-#     installed to /usr/local/bin, which sits ahead of /usr/bin on PATH.
-#     Upstream's standalone binary is itself named "glslang" now (the old
-#     "glslangValidator" name was dropped), so it's installed under the
-#     "glslangValidator" filename Mesa's meson.build actually searches for.
-#     Its own test suite and unused SPIRV-Tools CLI tools are disabled via
-#     CMake flags to keep this step from eating the job's time budget under
-#     QEMU emulation.
+#     from upstream source via its own CMake+Ninja flow and installed to
+#     /usr/local/bin (ahead of /usr/bin on PATH) under the "glslangValidator"
+#     filename Mesa's meson.build actually searches for.
 #   - -Dglx=xlib is the key option: it embeds the llvmpipe gallium driver
 #     directly into libGL.so instead of producing a separate loadable
 #     dri/swrast_dri.so, which is what lets the final package be a single
 #     self-contained libGL file with no DRI search-path plumbing needed.
-#   - -Ddri3 does NOT exist as a meson option in Mesa 26.x -- it was removed
-#     upstream as of the 25.0.0 release. An earlier iteration of this
-#     workflow tried to pass it to shrink the XCB dependency footprint
-#     (libxcb-dri3, libxcb-present, libxcb-sync, libxcb-shm, libX11-xcb),
-#     which broke `meson setup` outright ("Unknown option: dri3"). It's
-#     removed here. Note this isn't just a syntax fix: even where that
-#     option used to exist, it only controlled the OLD-STYLE GLX/DRI2-3
-#     loader, not Vulkan's X11 WSI code (src/vulkan/wsi/wsi_common_x11.c),
-#     which links those same XCB submodules unconditionally whenever X11
-#     Vulkan surface support is compiled in -- so disabling it would likely
-#     not have removed the runtime dependency anyway. Whether those XCB
-#     submodules are actually present or absent in Winlator's rootfs is
-#     still unconfirmed; it was inferred (not verified) from an earlier
-#     rootfs dump that was pulled for an unrelated purpose (checking the
-#     glibc version), not as a complete library inventory.
+#   - -Ddri3 does NOT exist as a meson option in Mesa 26.x (removed upstream
+#     as of 25.0.0). Do not re-add it: `meson setup` fails outright with
+#     "Unknown option: dri3".
 
 on:
   workflow_dispatch:
@@ -103,15 +115,15 @@ on:
         required: true
         default: "1.4.335"
       icd_library_path:
-        description: "Absolute library_path baked into the ICD json (must match where Winlator extracts libvulkan_lvp.so on-device)"
+        description: "Absolute library_path baked into the ICD json (must match where frost-v3 extracts libvulkan_lvp.so on-device: <files>/rootfs/usr/lib)"
         required: true
-        default: "/data/data/com.winlator/files/imagefs/usr/lib/libvulkan_lvp.so"
+        default: "/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so"
 
 env:
   MESA_VERSION: ${{ github.event.inputs.mesa_version || '26.0.0' }}
   LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '15' }}
   VULKAN_API_VERSION: ${{ github.event.inputs.vulkan_api_version || '1.4.335' }}
-  ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/imagefs/usr/lib/libvulkan_lvp.so' }}
+  ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so' }}
   TARGET_TRIPLE: aarch64-linux-gnu
 
 jobs:
@@ -193,11 +205,10 @@ jobs:
           # jammy's glslang-tools apt package satisfies availability but not
           # Mesa 26.x's version floor (meson.build hard-requires >= 12.2;
           # jammy's packaged build reports older than that). Building from
-          # upstream's own CMake+Ninja flow (not a bare `make` invocation,
-          # which is what broke the earlier turnip pipeline) avoids both
-          # problems at once. Installing to /usr/local/bin means it's found
-          # ahead of the apt-provided /usr/bin/glslangValidator on PATH, so
-          # no need to uninstall the apt package.
+          # upstream's own CMake+Ninja flow avoids both problems at once.
+          # Installing to /usr/local/bin means it's found ahead of the
+          # apt-provided /usr/bin/glslangValidator on PATH, so no need to
+          # uninstall the apt package.
           git clone --depth 1 https://github.com/KhronosGroup/glslang.git /tmp/glslang
           cd /tmp/glslang
           python3 update_glslang_sources.py
@@ -239,7 +250,7 @@ jobs:
           #                             libGL.so: bakes llvmpipe straight into
           #                             libGL instead of a separate dri/*.so
           #                             plugin loaded via DRI search path
-          # egl/gbm disabled          -> not part of the 3-file package Winlator
+          # egl/gbm disabled          -> not part of the package frost-v3
           #                             expects for this driver; omit to avoid
           #                             producing files that won't be shipped
           # llvm=enabled              -> mandatory: llvmpipe JITs shaders via LLVM
@@ -291,12 +302,17 @@ jobs:
             exit 1
           fi
 
-          echo "==> Assembling the two separate archives Winlator's extraction code expects"
+          echo "==> Assembling the two separate archives frost-v3's extraction code expects"
           # XServerDisplayActivity.extractGraphicsDriverFiles() extracts the
-          # Vulkan slot and OpenGL slot as two INDEPENDENT archives (since
-          # Winlator Official lets Vulkan and OpenGL renderers be picked
-          # independently, e.g. Turnip for Vulkan + llvmpipe for OpenGL). A
-          # single combined archive is never extracted by that code at all.
+          # Vulkan slot and OpenGL slot as two INDEPENDENT archives (frost-v3
+          # lets Vulkan and OpenGL renderers be picked independently, e.g.
+          # Turnip for Vulkan + LLVMPipe for OpenGL). A single combined
+          # archive (like alexvorxx/winlator's llvmpipe-<ver>.tzst) is never
+          # extracted by that code at all. The Vulkan slot extracts
+          #   graphics_driver/llvmpipe-vulkan-<ver>.tzst
+          # and the OpenGL slot extracts
+          #   graphics_driver/llvmpipe-opengl-<ver>.tzst
+          # into RootFS rootDir (<files>/rootfs).
           rm -rf /pkg
           mkdir -p /pkg/vulkan/usr/lib /pkg/vulkan/usr/share/vulkan/icd.d
           mkdir -p /pkg/opengl/usr/lib
@@ -305,19 +321,15 @@ jobs:
           cp -a "$VK_SRC" /pkg/vulkan/usr/lib/libvulkan_lvp.so
 
           echo "==> Checking for libtinfo/libsensors and bundling private copies if needed"
-          # Confirmed via direct inspection of Winlator Official's rootfs:
-          # libtinfo.so.6 and libsensors.so.5 are NOT present there (every
-          # other runtime dependency was individually verified present).
           # Rather than guess whether OUR specific build actually links
           # against either one (a different llvmpipe build might have for
           # different reasons -- e.g. a differently-configured static LLVM),
           # detect it directly from the produced binaries and, if so, bundle
           # a private copy alongside our own driver files. This is safe
           # because our own .so files are necessarily already being found on
-          # Winlator's library search path (LD_LIBRARY_PATH covers wherever
-          # these archives get extracted to) -- co-locating a private copy of
-          # a missing dependency there is a standard, well-established
-          # technique and does not require Winlator's rootfs to ship it.
+          # the library search path covering wherever these archives get
+          # extracted to -- co-locating a private copy of a missing
+          # dependency there is a standard, well-established technique.
           mkdir -p /tmp/extra-libs
           NEEDS_TINFO_GL=0; NEEDS_TINFO_VK=0
           NEEDS_SENSORS_GL=0; NEEDS_SENSORS_VK=0
@@ -463,6 +475,16 @@ jobs:
             echo "FATAL: opengl archive is missing usr/lib/libGL.so.1.7.0" >&2
             echo "$GL_LISTING" >&2
             exit 1
+          fi
+
+          # The ICD manifest must point at frost-v3's rootfs lib dir, NOT
+          # alexvorxx/winlator's imagefs path -- otherwise the Vulkan loader
+          # looks in a nonexistent directory and lavapipe never enumerates.
+          mkdir -p /tmp/icd-check
+          tar --zstd -xf "$VK_FILE" -C /tmp/icd-check usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          if ! grep -q '"library_path": "/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so"' /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json; then
+            echo "WARNING: ICD library_path is not the frost-v3 rootfs path -- check icd_library_path input" >&2
+            cat /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json >&2
           fi
 
           echo "vulkan archive OK: $(du -h "$VK_FILE" | cut -f1)"
