@@ -43,7 +43,15 @@ name: Build llvmpipe/lavapipe for Winlator Frost v3 (aarch64 glibc)
 #       RootFS.getLibDir() = <rootfs>/usr/lib)
 #     while alexvorxx/winlator serves it from
 #       /data/data/com.winlator/files/imagefs  (ImageFs.getRootDir()).
-#     The ICD library_path default below therefore points at the rootfs path.
+#     The ICD library_path default below therefore points at the rootfs path,
+#     using the exact /lib/ prefix convention of both known-good reference
+#     manifests in this project (freedreno_icd.aarch64.json and
+#     vortek_icd.aarch64.json both use
+#     /data/data/com.winlator/files/rootfs/lib/<driver>.so). On the current
+#     rootfs <rootfs>/lib is a symlink to usr/lib (verified in rootfs.tzst),
+#     so /lib/ and /usr/lib/ resolve identically -- but matching the proven
+#     convention removes one more variable when the driver silently fails to
+#     enumerate.
 #     A manifest baked with the imagefs path would make the Vulkan loader look
 #     in a directory that does not exist on frost-v3, so lavapipe would
 #     silently never enumerate. This is the single most important frost-v3
@@ -115,15 +123,15 @@ on:
         required: true
         default: "1.4.335"
       icd_library_path:
-        description: "Absolute library_path baked into the ICD json (must match where frost-v3 extracts libvulkan_lvp.so on-device: <files>/rootfs/usr/lib)"
+        description: "Absolute library_path baked into the ICD json (must match where frost-v3 extracts libvulkan_lvp.so on-device: <files>/rootfs/usr/lib, written with the /lib/ prefix convention of the turnip/vortek reference manifests)"
         required: true
-        default: "/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so"
+        default: "/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so"
 
 env:
   MESA_VERSION: ${{ github.event.inputs.mesa_version || '26.0.0' }}
   LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '15' }}
   VULKAN_API_VERSION: ${{ github.event.inputs.vulkan_api_version || '1.4.335' }}
-  ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so' }}
+  ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so' }}
   TARGET_TRIPLE: aarch64-linux-gnu
 
 jobs:
@@ -477,14 +485,19 @@ jobs:
             exit 1
           fi
 
-          # The ICD manifest must point at frost-v3's rootfs lib dir, NOT
-          # alexvorxx/winlator's imagefs path -- otherwise the Vulkan loader
-          # looks in a nonexistent directory and lavapipe never enumerates.
+          # The ICD manifest must point at frost-v3's rootfs lib dir with the
+          # /lib/ prefix convention of the turnip/vortek reference manifests,
+          # NOT alexvorxx/winlator's imagefs path -- otherwise the Vulkan
+          # loader looks in a nonexistent directory and lavapipe never
+          # enumerates (blank GPU info). (<rootfs>/lib symlinks to usr/lib,
+          # where the archive actually extracts the .so, so both spellings
+          # resolve -- but the /lib/ spelling is what is proven to work.)
           mkdir -p /tmp/icd-check
           tar --zstd -xf "$VK_FILE" -C /tmp/icd-check usr/share/vulkan/icd.d/lvp_icd.aarch64.json
-          if ! grep -q '"library_path": "/data/data/com.winlator/files/rootfs/usr/lib/libvulkan_lvp.so"' /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json; then
+          echo "ICD manifest content:"
+          cat /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          if ! grep -q '"library_path": "/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so"' /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json; then
             echo "WARNING: ICD library_path is not the frost-v3 rootfs path -- check icd_library_path input" >&2
-            cat /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json >&2
           fi
 
           echo "vulkan archive OK: $(du -h "$VK_FILE" | cut -f1)"
@@ -501,8 +514,18 @@ jobs:
           for f in /tmp/abi-check/usr/lib/libvulkan_lvp.so /tmp/abi-check/usr/lib/libGL.so.1.7.0; do
             [ -f "$f" ] || continue
             echo "--- $f ---"
+            echo "File type / architecture (must be ARM aarch64):"
+            file "$f"
+            MACHINE="$(aarch64-linux-gnu-readelf -h "$f" | grep 'Machine:' || true)"
+            echo "$MACHINE"
+            if ! echo "$MACHINE" | grep -q 'AArch64'; then
+              echo "FATAL: $f is not an AArch64 binary -- the emulated arm64 build did not take effect" >&2
+              exit 1
+            fi
             echo "NEEDED (runtime library dependencies):"
             aarch64-linux-gnu-readelf -d "$f" | grep NEEDED || true
+            echo "SONAME:"
+            aarch64-linux-gnu-readelf -d "$f" | grep SONAME || true
             echo "Max GLIBC symbol version required:"
             aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBC_[0-9.]+' | sort -V -u | tail -1 || true
             echo "Max GLIBCXX symbol version required:"
@@ -513,6 +536,70 @@ jobs:
             fi
             echo ""
           done
+          # The base rootfs only ships a libGL.so.1 symlink (pointing at
+          # libGL.so.1.7.0); guests link DT_NEEDED libGL.so.1. If Mesa ever
+          # changes libGL's SONAME, our renamed file would stop satisfying
+          # the loader and every GL client would die -- fail loudly here.
+          if ! aarch64-linux-gnu-readelf -d /tmp/abi-check/usr/lib/libGL.so.1.7.0 | grep -q 'SONAME.*libGL\.so\.1'; then
+            echo "FATAL: libGL SONAME is not libGL.so.1 -- the rootfs libGL.so.1 symlink would dangle" >&2
+            exit 1
+          fi
+
+      - name: Gate runtime deps against rootfs inventory and shipped drivers
+        run: |
+          # Every NEEDED library of the new driver must be satisfiable
+          # on-device, otherwise dlopen fails and the driver is recognized
+          # nowhere (blank GPU info) -- the exact symptom this gate exists to
+          # prevent. A dependency passes if EITHER:
+          #   (a) a private copy is bundled inside our own package (/pkg), OR
+          #   (b) a file of that basename exists in the base rootfs.tzst
+          #       (checked out with the repo -- plain 62MB file, no LFS), OR
+          #   (c) it is already NEEDED by one of the shipped, known-working
+          #       driver archives (turnip/vortek/zink/virgl/gladio), which
+          #       proves it loads in this rootfs even if the inventory check
+          #       below missed it (e.g. a lib provided outside usr/lib).
+          # Anything else fails LOUDLY here, naming the exact library, instead
+          # of shipping a dead driver. Compare with the turnip recipe: turnip
+          # is Mesa built with the same x11/XCB/static-LLVM shape, so a
+          # lavapipe dep failing this gate is a real build-config bug (e.g. a
+          # meson flag pulling in a new shared dep), not a device quirk.
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          echo "==> Inventorying base rootfs libraries"
+          tar --zstd -tf app/app/src/main/assets/rootfs.tzst | sed 's|.*/||' | sort -u > /tmp/rootfs-files.txt
+          wc -l /tmp/rootfs-files.txt
+          echo "==> Collecting NEEDED sets of shipped working drivers"
+          REFDIR=/tmp/ref-drivers
+          rm -rf "$REFDIR"; mkdir -p "$REFDIR"
+          for a in app/app/src/main/assets/graphics_driver/turnip-*.tzst \
+                   app/app/src/main/assets/graphics_driver/vortek-*.tzst \
+                   app/app/src/main/assets/graphics_driver/zink-*.tzst \
+                   app/app/src/main/assets/graphics_driver/virgl-*.tzst \
+                   app/app/src/main/assets/graphics_driver/gladio-*.tzst; do
+            [ -f "$a" ] || continue
+            echo "  reference: $a"
+            tar --zstd -xf "$a" -C "$REFDIR"
+          done
+          aarch64-linux-gnu-readelf -d "$REFDIR"/usr/lib/*.so 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | sort -u > /tmp/ref-needed.txt
+          echo "Proven-loadable NEEDED set from shipped drivers:"
+          cat /tmp/ref-needed.txt
+          FAIL=0
+          for f in /tmp/abi-check/usr/lib/libvulkan_lvp.so /tmp/abi-check/usr/lib/libGL.so.1.7.0; do
+            [ -f "$f" ] || continue
+            echo "--- deps of $(basename "$f") ---"
+            for lib in $(aarch64-linux-gnu-readelf -d "$f" | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
+              if [ -f "/tmp/abi-check/usr/lib/$lib" ]; then
+                echo "  OK (bundled private copy): $lib"
+              elif grep -qx "$lib" /tmp/rootfs-files.txt; then
+                echo "  OK (in base rootfs): $lib"
+              elif grep -qx "$lib" /tmp/ref-needed.txt; then
+                echo "  OK (used by a shipped driver): $lib"
+              else
+                echo "  FATAL: $lib is NEEDED by $(basename "$f") but is NOT bundled, NOT in rootfs.tzst, and used by NO shipped driver -- dlopen will fail on-device" >&2
+                FAIL=1
+              fi
+            done
+          done
+          exit $FAIL
 
       - name: Upload driver artifacts
         uses: actions/upload-artifact@v4
